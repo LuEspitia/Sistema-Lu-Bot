@@ -155,16 +155,24 @@ def obtener_datos(ticker):
         if hist.empty or len(hist) < 210:
             return {"ticker": ticker, "error": "Datos insuficientes"}
         c,h,l,v = hist["Close"],hist["High"],hist["Low"],hist["Volume"]
-        precio = float(c.iloc[-1]); prev = float(c.iloc[-2])
-        es_pm  = False
+        prev  = float(c.iloc[-2])
+        es_pm = False
+        precio = float(c.iloc[-1])
+        # Precio fresco: intentar last_price (tiempo real) antes que vela cerrada
         try:
             fi = s.fast_info
+            lp = float(getattr(fi, "last_price", None) or 0)
             pm = float(getattr(fi, "pre_market_price", None) or 0)
-            if pm > 0: precio = pm; es_pm = True
+            if lp > 0:
+                precio = lp
+            elif pm > 0:
+                precio = pm; es_pm = True
         except: pass
-        pct = (precio-prev)/prev*100
-        vh  = float(v.iloc[-1]) if float(v.iloc[-1])>0 else float(v.iloc[-2])
+        pct = (precio - prev) / prev * 100
+        vh  = float(v.iloc[-1]) if float(v.iloc[-1]) > 0 else float(v.iloc[-2])
         vp  = float(v.iloc[-20:].mean())
+        # ATH 52 semanas para cap de price targets
+        ath_52w = float(h.iloc[-252:].max()) if len(h) >= 252 else float(h.max())
         mv,sv,hv,me = calc_macd(c)
         av,dip,dim,ae = calc_adx(h,l,c)
         nombre = ticker
@@ -182,7 +190,7 @@ def obtener_datos(ticker):
             "rsi": calc_rsi(c),
             "macd": mv, "macd_s": sv, "macd_h": hv, "macd_e": me,
             "adx": av, "dip": dip, "dim": dim, "adx_e": ae,
-            "vh": vh, "vp": vp, "error": None
+            "vh": vh, "vp": vp, "ath_52w": ath_52w, "error": None
         }
     except Exception as e:
         return {"ticker": ticker, "error": str(e)}
@@ -199,6 +207,8 @@ def analizar(d):
     en_rango = CONFIG["price_min"] <= p <= CONFIG["price_max"]
     rsi_ok   = CONFIG["rsi_min"] <= d["rsi"] <= CONFIG["rsi_max"] if d["rsi"] else False
     vol_r    = d["vh"]/d["vp"] if d["vp"]>0 else 0
+    # Señal tardía: precio ya subió >2% sobre SMA8 → entrada arriesgada
+    senal_tardia = bool(s8 and p > s8 * 1.02)
     estado   = ("ABANICO COMPLETO" if fan==4 and en_rango
                 else "ABANICO PARCIAL" if fan>=2 and en_rango
                 else "ABANICO ROTO")
@@ -206,23 +216,51 @@ def analizar(d):
         "fan": fan, "estado": estado,
         "c1": c1, "c2": c2, "c3": c3, "c4": c4,
         "en_rango": en_rango, "rsi_ok": rsi_ok, "vol_r": vol_r,
+        "senal_tardia": senal_tardia,
         "e10": p>d["ema10"], "e20": p>d["ema20"],
         "e50": p>d["ema50"], "e200": p>d["ema200"]
     }
 
-def posicion(precio):
-    riesgo = CONFIG["riesgo_fijo_usd"]     # 150 USD fijos
+def posicion(precio, ath_52w=None):
+    riesgo = CONFIG["riesgo_fijo_usd"]
     sp     = CONFIG["stop_loss_pct"] / 100
     stop   = precio * (1 - sp)
-    rx     = precio - stop               # riesgo por accion
-    acc    = max(1, int(riesgo / rx))    # acciones exactas para ~100 USD de riesgo
+    rx     = precio - stop
+    acc    = max(1, int(riesgo / rx))
     tot    = acc * precio
-    perd   = acc * rx                    # siempre ~100 USD
-    t1     = precio * 1.12
-    t2     = precio * 1.22
-    rr     = (t1 - precio) / rx
+    perd   = acc * rx
+    t1     = round(precio * 1.12, 2)   # +12% / ~2R
+    t2     = round(precio * 1.22, 2)   # +22% / ~3.7R
+    t3     = round(precio * 1.35, 2)   # +35% / runner
+    # Capear PT2 y PT3 al 98% del ATH de 52 semanas
+    if ath_52w and ath_52w > precio:
+        techo = round(ath_52w * 0.98, 2)
+        if t2 > techo: t2 = techo
+        if t3 > techo: t3 = techo
+    rr = (t1 - precio) / rx
     return {"acc": acc, "tot": tot, "stop": stop,
-            "perd": perd, "t1": t1, "t2": t2, "rr": rr}
+            "perd": perd, "t1": t1, "t2": t2, "t3": t3, "rr": rr}
+
+# ── Probabilidades de R ───────────────────────────────────────
+def calc_probabilidades(fan, adx, rsi, vol_r):
+    """Estima probabilidad de alcanzar R1, R2, R3 basado en señales técnicas."""
+    base = {4: (68, 42, 25), 3: (52, 32, 18), 2: (38, 20, 10)}
+    p1, p2, p3 = base.get(fan, (38, 20, 10))
+    # Ajuste ADX
+    if adx and adx >= 25:    p1+=10; p2+=8;  p3+=5
+    elif adx and adx < 20:   p1-=10; p2-=8;  p3-=5
+    # Ajuste RSI
+    if rsi:
+        if rsi > 70:         p1-=10; p2-=8;  p3-=5
+        elif rsi < 50:       p1-=6;  p2-=5;  p3-=3
+    # Ajuste volumen
+    if vol_r < 0.5:          p1-=10; p2-=8;  p3-=5
+    elif vol_r >= 1.5:       p1+=5;  p2+=4;  p3+=3
+    # Clamp
+    p1 = max(5, min(82, p1))
+    p2 = max(5, min(65, p2))
+    p3 = max(5, min(50, p3))
+    return p1, p2, p3
 
 # ── IA ────────────────────────────────────────────────────────
 def analizar_ia(d, a, pos):
@@ -291,43 +329,57 @@ def build_msg(d, a, pos, ia):
     ef     = "OK 4/4" if a["fan"]==4 else f"PARCIAL {a['fan']}/4"
     rsi_v  = d["rsi"] if d["rsi"] else 0
 
-    # RSI: OK si está entre 45-70 inclusive, LIMITE si es exactamente 70
-    if rsi_v < CONFIG["rsi_min"]:
-        rsi_tag = "debil"
-    elif rsi_v > CONFIG["rsi_max"]:
-        rsi_tag = "sobrecomprado"
-    elif rsi_v == CONFIG["rsi_max"]:
-        rsi_tag = "en el limite"
-    else:
-        rsi_tag = "OK"
+    if rsi_v < CONFIG["rsi_min"]:   rsi_tag = "debil"
+    elif rsi_v > CONFIG["rsi_max"]: rsi_tag = "sobrecomprado"
+    elif rsi_v == CONFIG["rsi_max"]: rsi_tag = "en el limite"
+    else:                            rsi_tag = "OK"
 
-    vol_tag = "OK" if a["vol_r"] >= 1.5 else "bajo"
+    vol_tag   = "OK" if a["vol_r"] >= 1.5 else "bajo"
+    tardia_av = "  ⚠ precio >2% sobre SMA8 - verifica entrada" if a.get("senal_tardia") else ""
+
+    p1, p2, p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, a["vol_r"])
+
+    # Plan de salida Sistema Hibrido Lu
+    acc = pos['acc']
+    s25 = max(1, round(acc * 0.25))
+    s30 = max(1, round(acc * 0.30))
+    s20 = max(1, round(acc * 0.20))
+    s25b= acc - s25 - s30 - s20
 
     return (
-        f"*SISTEMA LU - SEÑAL*\n"
+        f"*SISTEMA LU - SIGNAL*\n"
         f"{hora}{pm_tag}\n"
         f"Timeframe: DIARIO (swing 5-10 dias)\n\n"
         f"*{d['ticker']}*  {d.get('nombre','')}\n"
-        f"Precio: {d['precio']:.2f} USD  ({d['pct']:+.1f}%)\n\n"
+        f"Precio: {d['precio']:.2f} USD  ({d['pct']:+.1f}%){tardia_av}\n\n"
         f"*Abanico SMA {ef}*\n"
-        f"{'SI' if a['c1'] else 'NO'} Precio > SMA8   {d['sma8']:.2f}\n"
-        f"{'SI' if a['c2'] else 'NO'} SMA8  > SMA20   {d['sma20']:.2f}\n"
-        f"{'SI' if a['c3'] else 'NO'} SMA20 > SMA50   {d['sma50']:.2f}\n"
-        f"{'SI' if a['c4'] else 'NO'} SMA50 > SMA200  {d['sma200']:.2f}\n\n"
+        f"{'SI' if a['c1'] else 'NO'} Precio > SMA8    {d['sma8']:.2f}\n"
+        f"{'SI' if a['c2'] else 'NO'} SMA8   > SMA20   {d['sma20']:.2f}\n"
+        f"{'SI' if a['c3'] else 'NO'} SMA20  > SMA50   {d['sma50']:.2f}\n"
+        f"{'SI' if a['c4'] else 'NO'} SMA50  > SMA200  {d['sma200']:.2f}\n\n"
         f"*Indicadores*\n"
         f"MACD: {d['macd_e']}\n"
         f"RSI:  {rsi_v:.0f}  ({rsi_tag})\n"
         f"ADX:  {d['adx_e']} ({d['adx']:.0f})\n"
         f"Vol:  {a['vol_r']:.1f}x promedio ({vol_tag})\n\n"
         f"*Tu posicion*\n"
-        f"Precio entrada:  {d['precio']:.2f} USD\n"
+        f"Entrada:         {d['precio']:.2f} USD\n"
         f"Comprar:         *{pos['acc']} acciones*\n"
         f"Capital usado:   {pos['tot']:.0f} USD\n"
         f"Stop loss:       {pos['stop']:.2f} USD  (-6%)\n"
-        f"Target 1:        {pos['t1']:.2f} USD  (+12%)\n"
-        f"Target 2:        {pos['t2']:.2f} USD  (+22%)\n"
+        f"Target 1 (+12%): {pos['t1']:.2f} USD\n"
+        f"Target 2 (+22%): {pos['t2']:.2f} USD\n"
+        f"Target 3 (runner): {pos['t3']:.2f} USD\n"
         f"R/R:             {pos['rr']:.1f}x\n"
-        f"Perdida maxima:  {pos['perd']:.0f} USD  <- tu riesgo real\n\n"
+        f"Riesgo maximo:   {pos['perd']:.0f} USD\n\n"
+        f"*Plan salida (Sistema Hibrido Lu)*\n"
+        f"25% = {s25} acc en T1 | 30% = {s30} acc en T2\n"
+        f"20% = {s20} acc en resistencia | 25% = {s25b} acc trail EMA8\n"
+        f"Time-stop: 7 dias sin llegar T1 -> salida total\n\n"
+        f"*Probabilidades*\n"
+        f"Llegar T1 (+12%): {p1}%\n"
+        f"Llegar T2 (+22%): {p2}%\n"
+        f"Llegar T3 (runner): {p3}%\n\n"
         f"*IA {ia['prob']}%  -  {ia['senal']}*\n"
         f"{ia['razon']}\n"
         f"Vigilar: {ia['alerta']}\n\n"
@@ -365,7 +417,7 @@ def main():
             continue
 
         print(f"  *** FAN {a['fan']}/4 detectado!")
-        pos = posicion(d["precio"])
+        pos = posicion(d["precio"], d.get("ath_52w"))
         ia  = analizar_ia(d, a, pos)
         print(f"  IA: {ia['prob']}%  {ia['senal']}")
 

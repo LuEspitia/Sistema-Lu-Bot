@@ -270,7 +270,7 @@ def analizar_ia(d, a, pos):
 def send_wa(msg):
     try:
         # Encode explícito UTF-8 para la N con tilde y otros caracteres
-        msg_encoded = quote(texto.encode("utf-8"), safe="")
+        msg_encoded = quote(msg.encode("utf-8"), safe="")
         url = (
             f"https://api.callmebot.com/whatsapp.php?"
             f"phone={WHATSAPP_NUMBER}"

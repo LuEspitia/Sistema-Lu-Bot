@@ -1,4 +1,4 @@
-name: Sistema Lu — Bot Alertas
+name: Solares — Sistema Sirio Bot
 
 on:
   schedule:
@@ -51,6 +51,6 @@ jobs:
       - name: Correr el bot
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CALLMEBOT_APIKEY:  ${{ secrets.CALLMEBOT_APIKEY }}
-          WHATSAPP_NUMBER:   ${{ secrets.WHATSAPP_NUMBER }}
-        run: python scanner_bot_v4.py
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scanner_bot_v5.py

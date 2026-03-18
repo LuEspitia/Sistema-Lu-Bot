@@ -1,7 +1,8 @@
 """
-SISTEMA LU — BOT v3.1
-Escanea TODO el universo de acciones via Finviz (no solo una lista fija).
-Filtra: precio $10-$150, volumen >1M, sobre SMA200 → luego verifica abanico SMA completo.
+SISTEMA LU - BOT v3.2
+- Precio real corregido (sin ajuste automatico de yfinance)
+- Encoding de caracteres especiales corregido
+- Timeframe: diario (1d) - correcto para swing trading
 """
 
 import yfinance as yf
@@ -13,7 +14,6 @@ import json
 from datetime import datetime, date
 from urllib.parse import quote
 
-# ── Claves (vienen de GitHub Secrets) ────────────────────────
 WHATSAPP_NUMBER  = os.environ.get("WHATSAPP_NUMBER", "")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
 CLAUDE_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -24,7 +24,6 @@ if not WHATSAPP_NUMBER or not CALLMEBOT_APIKEY:
 
 import anthropic
 
-# ── Configuración ─────────────────────────────────────────────
 CONFIG = {
     "capital_usd":        33140,
     "risk_per_trade_pct": 2.0,
@@ -36,11 +35,9 @@ CONFIG = {
     "min_volume":         1_000_000,
     "min_fan_to_alert":   3,
     "adx_min_trend":      20,
-    "max_tickers_scan":   150,   # máximo tickers a revisar por escaneo
-    "max_alertas_dia":    5,     # máximo alertas por día para no saturar WA
+    "max_tickers_scan":   150,
+    "max_alertas_dia":    5,
     "state_file":         "/tmp/lu_alertas_hoy.json",
-
-    # Tickers prioritarios que SIEMPRE se revisan primero
     "watchlist_prioritaria": [
         "KGC", "OXY", "SLB", "BTU", "PAAS",
         "SQM", "FCX", "HIMS", "EW",  "DAR",
@@ -49,7 +46,6 @@ CONFIG = {
     ]
 }
 
-# ── Anti-spam ─────────────────────────────────────────────────
 def cargar_estado():
     try:
         with open(CONFIG["state_file"], "r") as f:
@@ -67,96 +63,68 @@ def guardar_estado(e):
     except:
         pass
 
-# ── Obtener tickers del universo completo via Finviz ──────────
 def obtener_universo_finviz():
-    """
-    Usa el screener de Finviz para obtener acciones que cumplen
-    los filtros básicos: precio $10-$150, vol >1M, sobre SMA200.
-    Devuelve lista de tickers.
-    """
     print("\nObteniendo universo de Finviz...")
     try:
-        # Finviz screener: precio 10-150, vol>1M, sobre SMA200, sobre SMA50
         url = (
             "https://finviz.com/screener.ashx?v=111"
             "&f=sh_price_o10,sh_price_u150"
             ",sh_avgvol_o1000"
             ",ta_sma200_pa"
             ",ta_sma50_pa"
-            "&ft=4"
-            "&o=-volume"
-            "&r=1"
+            "&ft=4&o=-volume&r=1"
         )
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         resp = requests.get(url, headers=headers, timeout=30)
 
         if resp.status_code != 200:
-            print(f"Finviz error {resp.status_code}, usando watchlist prioritaria")
+            print(f"Finviz error {resp.status_code}, usando watchlist")
             return CONFIG["watchlist_prioritaria"]
 
-        # Parsear tickers de la respuesta HTML
         from html.parser import HTMLParser
 
-        class FinvizParser(HTMLParser):
+        class FP(HTMLParser):
             def __init__(self):
                 super().__init__()
-                self.tickers = []
-                self.in_ticker = False
-
+                self.tickers = []; self.capture = False
             def handle_starttag(self, tag, attrs):
-                attrs_dict = dict(attrs)
-                # Finviz usa class="screener-link-primary" para los tickers
-                if (tag == "a" and
-                    attrs_dict.get("class") == "screener-link-primary"):
-                    self.in_ticker = True
-
+                d = dict(attrs)
+                if tag == "a" and d.get("class") == "screener-link-primary":
+                    self.capture = True
             def handle_data(self, data):
-                if self.in_ticker:
+                if self.capture:
                     t = data.strip()
                     if t and t.isalpha() and len(t) <= 5:
                         self.tickers.append(t)
-                    self.in_ticker = False
+                    self.capture = False
 
-        parser = FinvizParser()
-        parser.feed(resp.text)
-        tickers_finviz = parser.tickers
+        p = FP(); p.feed(resp.text)
+        tickers = p.tickers
 
-        if len(tickers_finviz) < 5:
-            print("Pocos tickers de Finviz, usando watchlist prioritaria")
+        if len(tickers) < 5:
             return CONFIG["watchlist_prioritaria"]
 
-        print(f"Finviz devolvió {len(tickers_finviz)} tickers")
-
-        # Combinar: prioritarios primero + universo Finviz (sin duplicados)
+        print(f"Finviz: {len(tickers)} tickers")
         combinados = list(CONFIG["watchlist_prioritaria"])
-        for t in tickers_finviz:
+        for t in tickers:
             if t not in combinados:
                 combinados.append(t)
-
-        # Limitar al máximo configurado
-        resultado = combinados[:CONFIG["max_tickers_scan"]]
-        print(f"Total a escanear: {len(resultado)} tickers")
-        return resultado
+        return combinados[:CONFIG["max_tickers_scan"]]
 
     except Exception as e:
-        print(f"Error obteniendo universo: {e}")
-        print("Usando watchlist prioritaria")
+        print(f"Error Finviz: {e} - usando watchlist")
         return CONFIG["watchlist_prioritaria"]
 
-# ── Indicadores técnicos ──────────────────────────────────────
 def ema(s, p):
     return s.ewm(span=p, adjust=False).mean()
 
-def sma(s, p):
+def sma_val(s, p):
     return float(s.iloc[-p:].mean()) if len(s) >= p else None
 
 def calc_rsi(c, p=14):
     if len(c) < p + 1: return None
     d  = c.diff()
-    g  = d.where(d > 0, 0.0)
-    l  = -d.where(d < 0, 0.0)
+    g  = d.where(d > 0, 0.0); l = -d.where(d < 0, 0.0)
     ag = g.ewm(com=p-1, min_periods=p).mean()
     al = l.ewm(com=p-1, min_periods=p).mean()
     rs = ag / al
@@ -164,9 +132,7 @@ def calc_rsi(c, p=14):
 
 def calc_macd(c):
     if len(c) < 35: return None, None, None, "N/A"
-    ml = ema(c, 12) - ema(c, 26)
-    sl = ema(ml, 9)
-    hl = ml - sl
+    ml = ema(c, 12) - ema(c, 26); sl = ema(ml, 9); hl = ml - sl
     mv, sv, hv = float(ml.iloc[-1]), float(sl.iloc[-1]), float(hl.iloc[-1])
     if   mv > sv and hv > 0:  estado = "Bullish"
     elif mv > sv:             estado = "Weak Bull"
@@ -188,57 +154,81 @@ def calc_adx(h, l, c, p=14):
     e   = "Strong Trend" if av >= 25 else "Moderate" if av >= 20 else "Weak"
     return av, float(dip.iloc[-1]), float(dim.iloc[-1]), e
 
-# ── Obtener datos de un ticker ────────────────────────────────
 def obtener_datos(ticker):
     try:
-        s    = yf.Ticker(ticker)
-        hist = s.history(period="1y", interval="1d", prepost=True)
+        s = yf.Ticker(ticker)
+
+        # ── CLAVE: auto_adjust=False para precios reales sin distorsion ──
+        hist = s.history(
+            period="1y",
+            interval="1d",
+            auto_adjust=False,   # <-- evita que yfinance distorsione los precios
+            prepost=False        # <-- solo mercado regular, sin pre/post market
+        )
+
         if hist.empty or len(hist) < 210:
             return {"ticker": ticker, "error": "Datos insuficientes"}
-        c, h, l, v = hist["Close"], hist["High"], hist["Low"], hist["Volume"]
+
+        c = hist["Close"]
+        h = hist["High"]
+        l = hist["Low"]
+        v = hist["Volume"]
+
+        # Precio de cierre mas reciente (sin distorsion)
         precio = float(c.iloc[-1])
         prev   = float(c.iloc[-2])
-        es_pm  = False
+
+        # Intentar precio pre-market por separado
+        es_pm = False
         try:
             fi = s.fast_info
             pm = float(getattr(fi, "pre_market_price", None) or 0)
-            if pm > 0:
-                precio = pm; es_pm = True
-        except: pass
+            # Solo usar pre-market si es razonable (dentro del 15% del cierre)
+            if pm > 0 and abs(pm - precio) / precio < 0.15:
+                precio = pm
+                es_pm  = True
+        except:
+            pass
+
         pct = (precio - prev) / prev * 100
         vh  = float(v.iloc[-1]) if float(v.iloc[-1]) > 0 else float(v.iloc[-2])
         vp  = float(v.iloc[-20:].mean())
-        mv, sv, hv, me = calc_macd(c)
-        av, dip, dim, ae = calc_adx(h, l, c)
+
+        mv, sv, hv_macd, me = calc_macd(c)
+        av, dip, dim, ae    = calc_adx(h, l, c)
+
         nombre = ticker
-        try: nombre = s.info.get("shortName", ticker)
-        except: pass
+        try:
+            info   = s.info
+            nombre = info.get("shortName", ticker)
+        except:
+            pass
+
         return {
             "ticker": ticker, "nombre": nombre,
             "precio": precio, "prev": prev, "pct": pct, "es_pm": es_pm,
-            "sma8":   sma(c, 8),   "sma20":  sma(c, 20),
-            "sma50":  sma(c, 50),  "sma200": sma(c, 200),
+            "sma8":   sma_val(c, 8),   "sma20":  sma_val(c, 20),
+            "sma50":  sma_val(c, 50),  "sma200": sma_val(c, 200),
             "ema10":  float(ema(c, 10).iloc[-1]),
             "ema20":  float(ema(c, 20).iloc[-1]),
             "ema50":  float(ema(c, 50).iloc[-1]),
             "ema200": float(ema(c, 200).iloc[-1]),
             "rsi":  calc_rsi(c),
-            "macd": mv, "macd_s": sv, "macd_h": hv, "macd_e": me,
+            "macd": mv, "macd_s": sv, "macd_h": hv_macd, "macd_e": me,
             "adx":  av, "dip": dip, "dim": dim, "adx_e": ae,
             "vh": vh, "vp": vp, "error": None
         }
     except Exception as e:
         return {"ticker": ticker, "error": str(e)}
 
-# ── Análisis del setup ────────────────────────────────────────
 def analizar(d):
-    p    = d["precio"]
+    p = d["precio"]
     s8, s20, s50, s200 = d["sma8"], d["sma20"], d["sma50"], d["sma200"]
     c1 = bool(p   > s8)   if s8   else False
     c2 = bool(s8  > s20)  if s20  else False
     c3 = bool(s20 > s50)  if s50  else False
     c4 = bool(s50 > s200) if s200 else False
-    fan      = sum([c1, c2, c3, c4])
+    fan = sum([c1, c2, c3, c4])
     en_rango = CONFIG["price_min"] <= p <= CONFIG["price_max"]
     rsi_ok   = CONFIG["rsi_min"] <= d["rsi"] <= CONFIG["rsi_max"] if d["rsi"] else False
     vol_r    = d["vh"] / d["vp"] if d["vp"] > 0 else 0
@@ -268,16 +258,16 @@ def posicion(precio):
     return {"acc": acc, "tot": tot, "stop": stop,
             "perd": perd, "t1": t1, "t2": t2, "rr": rr}
 
-# ── IA ────────────────────────────────────────────────────────
 def analizar_ia(d, a, pos):
     if not CLAUDE_API_KEY:
-        return {"prob": 0, "señal": "SIN IA", "razon": "Sin API key", "alerta": ""}
+        return {"prob": 0, "senal": "SIN IA", "razon": "Sin API key", "alerta": ""}
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        rsi_v  = d['rsi'] if d['rsi'] else 0
+        rsi_v  = d["rsi"] if d["rsi"] else 0
         prompt = (
             f"Analiza {d['ticker']} bajo Sistema Maestro v4.\n"
-            f"Precio: ${d['precio']:.2f} ({d['pct']:+.2f}%)\n"
+            f"Precio real: ${d['precio']:.2f} ({d['pct']:+.2f}%)\n"
+            f"Timeframe: diario (1d) - swing trading 5-10 dias\n"
             f"Fan SMA: {a['fan']}/4\n"
             f"MACD: {d['macd_e']} | RSI: {rsi_v:.0f} | "
             f"ADX: {d['adx_e']} ({d['adx']:.0f})\n"
@@ -292,7 +282,12 @@ def analizar_ia(d, a, pos):
         msg = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=250,
-            system="Analizador Sistema Maestro v4. Responde formato exacto, español.",
+            system=(
+                "Analizador Sistema Maestro v4 swing trading. "
+                "Timeframe diario. MACD bearish penaliza. "
+                "RSI>72 penaliza. ADX<20 penaliza. "
+                "Responde solo en formato exacto, en espanol."
+            ),
             messages=[{"role": "user", "content": prompt}]
         )
         txt = msg.content[0].text
@@ -302,17 +297,16 @@ def analizar_ia(d, a, pos):
             if ln.startswith("PROBABILIDAD:"):
                 try: pr = int(ln.split(":")[1].strip().replace("%",""))
                 except: pass
-            elif ln.upper().startswith("SENAL:") or ln.upper().startswith("SEÑAL:"):
+            elif "SENAL:" in ln.upper() or "SEÑAL:" in ln.upper():
                 se = ln.split(":",1)[1].strip()
-            elif ln.upper().startswith("RAZON:") or ln.upper().startswith("RAZÓN:"):
+            elif "RAZON:" in ln.upper() or "RAZON:" in ln.upper():
                 ra = ln.split(":",1)[1].strip()
             elif ln.startswith("ALERTA:"):
                 al = ln.split(":",1)[1].strip()
-        return {"prob": pr, "señal": se, "razon": ra, "alerta": al}
+        return {"prob": pr, "senal": se, "razon": ra, "alerta": al}
     except Exception as e:
-        return {"prob": 0, "señal": "ERROR", "razon": str(e)[:80], "alerta": ""}
+        return {"prob": 0, "senal": "ERROR", "razon": str(e)[:80], "alerta": ""}
 
-# ── WhatsApp ──────────────────────────────────────────────────
 def send_wa(msg):
     try:
         url = (
@@ -330,86 +324,85 @@ def send_wa(msg):
 def build_msg(d, a, pos, ia):
     fecha  = datetime.now().strftime("%d/%m/%Y %H:%M")
     pm_tag = " [PRE-MARKET]" if d.get("es_pm") else ""
-    emoji  = {"ENTRAR":"🟢","ESPERAR":"🟡","NO APLICA":"🔴"}.get(ia["señal"],"⚪")
-    ef     = "✅" if a["fan"] == 4 else "⚠️"
-    rsi_v  = d['rsi'] if d['rsi'] else 0
+    emoji  = {"ENTRAR":"verde","ESPERAR":"amarillo","NO APLICA":"rojo"}.get(ia["senal"],"")
+    ef     = "OK" if a["fan"] == 4 else "PARCIAL"
+    rsi_v  = d["rsi"] if d["rsi"] else 0
+
+    # Señal con palabras (evita problemas de encoding con emojis)
+    senal_txt = {
+        "ENTRAR":    "ENTRAR",
+        "ESPERAR":   "ESPERAR",
+        "NO APLICA": "NO APLICA"
+    }.get(ia["senal"], ia["senal"])
+
     return (
-        f"🤖 *SISTEMA LU — SEÑAL*\n"
-        f"{fecha}{pm_tag}\n\n"
-        f"*{d['ticker']}*  {d.get('nombre','')}\n"
-        f"💰 ${d['precio']:.2f}  ({d['pct']:+.1f}%)\n\n"
-        f"{ef} *Abanico SMA {a['fan']}/4*\n"
-        f"{'✅' if a['c1'] else '❌'} Precio > SMA8   ${d['sma8']:.2f}\n"
-        f"{'✅' if a['c2'] else '❌'} SMA8  > SMA20   ${d['sma20']:.2f}\n"
-        f"{'✅' if a['c3'] else '❌'} SMA20 > SMA50   ${d['sma50']:.2f}\n"
-        f"{'✅' if a['c4'] else '❌'} SMA50 > SMA200  ${d['sma200']:.2f}\n\n"
-        f"📊 *Indicadores*\n"
+        f"SISTEMA LU - SENAL\n"
+        f"{fecha}{pm_tag}\n"
+        f"Timeframe: DIARIO (swing 5-10 dias)\n\n"
+        f"{d['ticker']} - {d.get('nombre','')}\n"
+        f"Precio: ${d['precio']:.2f} ({d['pct']:+.1f}%)\n\n"
+        f"Abanico SMA {a['fan']}/4 - {ef}\n"
+        f"{'SI' if a['c1'] else 'NO'} Precio > SMA8   ${d['sma8']:.2f}\n"
+        f"{'SI' if a['c2'] else 'NO'} SMA8  > SMA20   ${d['sma20']:.2f}\n"
+        f"{'SI' if a['c3'] else 'NO'} SMA20 > SMA50   ${d['sma50']:.2f}\n"
+        f"{'SI' if a['c4'] else 'NO'} SMA50 > SMA200  ${d['sma200']:.2f}\n\n"
+        f"Indicadores\n"
         f"MACD: {d['macd_e']}\n"
-        f"RSI:  {rsi_v:.0f}  {'✅' if a['rsi_ok'] else '⚠️'}\n"
+        f"RSI:  {rsi_v:.0f} ({'OK' if a['rsi_ok'] else 'ALTO' if rsi_v > 72 else 'BAJO'})\n"
         f"ADX:  {d['adx_e']} ({d['adx']:.0f})\n"
-        f"Vol:  {a['vol_r']:.1f}x  {'✅' if a['vol_r']>=1.5 else '⚠️'}\n\n"
-        f"📐 *Tu posición*\n"
-        f"Comprar: *{pos['acc']} acciones*  (${pos['tot']:.0f})\n"
-        f"🛑 Stop:     ${pos['stop']:.2f}\n"
-        f"🎯 Target 1: ${pos['t1']:.2f}  +12%\n"
-        f"🎯 Target 2: ${pos['t2']:.2f}  +22%\n"
-        f"⚖️ R/R: {pos['rr']:.1f}x   Riesgo: ${pos['perd']:.0f}\n\n"
-        f"{emoji} *IA {ia['prob']}%  {ia['señal']}*\n"
+        f"Vol:  {a['vol_r']:.1f}x prom\n\n"
+        f"Tu posicion\n"
+        f"Comprar: {pos['acc']} acciones (${pos['tot']:.0f})\n"
+        f"Stop loss: ${pos['stop']:.2f}\n"
+        f"Target 1:  ${pos['t1']:.2f}  (+12%)\n"
+        f"Target 2:  ${pos['t2']:.2f}  (+22%)\n"
+        f"R/R: {pos['rr']:.1f}x  Riesgo: ${pos['perd']:.0f}\n\n"
+        f"IA {ia['prob']}% - {senal_txt}\n"
         f"{ia['razon']}\n"
-        f"⚡ {ia['alerta']}\n\n"
-        f"_Sistema Maestro v4_"
+        f"Vigilar: {ia['alerta']}\n\n"
+        f"Sistema Maestro v4 - Diario"
     )
 
-# ── MAIN ──────────────────────────────────────────────────────
 def main():
-    print(f"=== SISTEMA LU v3.1  {datetime.now().strftime('%d/%m/%Y %H:%M')} ===")
+    print(f"=== SISTEMA LU v3.2  {datetime.now().strftime('%d/%m/%Y %H:%M')} ===")
 
     estado = cargar_estado()
     ya     = estado.get("alertados", [])
     count  = estado.get("count", 0)
 
     if count >= CONFIG["max_alertas_dia"]:
-        print(f"Máximo de {CONFIG['max_alertas_dia']} alertas del día alcanzado. Fin.")
+        print(f"Maximo de alertas del dia alcanzado ({CONFIG['max_alertas_dia']}). Fin.")
         return
 
-    if ya:
-        print(f"Ya alertados hoy: {', '.join(ya)}")
-
-    # Obtener universo completo desde Finviz
     tickers = obtener_universo_finviz()
-
-    # Quitar los ya alertados hoy
     tickers = [t for t in tickers if t not in ya]
-    print(f"Tickers a revisar esta vuelta: {len(tickers)}")
+    print(f"Tickers a revisar: {len(tickers)}")
 
     nuevas = 0
 
     for ticker in tickers:
-        # Parar si llegamos al máximo de alertas del día
         if count + nuevas >= CONFIG["max_alertas_dia"]:
-            print(f"Máximo de alertas diarias alcanzado ({CONFIG['max_alertas_dia']}). Fin.")
             break
 
         print(f"  {ticker}...", end=" ", flush=True)
         d = obtener_datos(ticker)
 
         if d.get("error"):
-            print(f"skip ({d['error'][:40]})")
-            continue
+            print(f"skip"); continue
 
-        rsi_str = f"{d['rsi']:.0f}" if d['rsi'] else "N/A"
-        print(f"${d['precio']:.2f} RSI:{rsi_str} MACD:{d['macd_e']}")
+        rsi_str = f"{d['rsi']:.0f}" if d["rsi"] else "N/A"
+        print(f"${d['precio']:.2f}  RSI:{rsi_str}  MACD:{d['macd_e']}")
 
         a = analizar(d)
 
         if a["fan"] < CONFIG["min_fan_to_alert"] or not a["en_rango"]:
             continue
 
-        print(f"  *** FAN {a['fan']}/4 — {a['estado']} — analizando con IA...")
+        print(f"  *** FAN {a['fan']}/4 - {a['estado']}")
 
         pos = posicion(d["precio"])
         ia  = analizar_ia(d, a, pos)
-        print(f"  IA: {ia['prob']}%  {ia['señal']}")
+        print(f"  IA: {ia['prob']}% - {ia['senal']}")
 
         msg = build_msg(d, a, pos, ia)
         ok  = send_wa(msg)
@@ -420,22 +413,21 @@ def main():
             estado["alertados"] = ya
             estado["count"]     = count + nuevas
             guardar_estado(estado)
-            print(f"  ✅ WhatsApp enviado ({count + nuevas}/{CONFIG['max_alertas_dia']} hoy)")
+            print(f"  OK WhatsApp enviado")
         else:
-            print(f"  ⚠️ Error WhatsApp")
+            print(f"  ERROR WhatsApp")
 
-    print(f"\n=== Fin: {nuevas} alertas nuevas esta vuelta ===")
+    print(f"\n=== Fin: {nuevas} alertas nuevas ===")
 
-    # Mensaje de sin setups solo en el primer scan del día (8am)
     hora_actual = datetime.now().hour
     if nuevas == 0 and hora_actual == 13 and count == 0:
         send_wa(
-            f"🤖 *SISTEMA LU*\n"
+            f"SISTEMA LU\n"
             f"{datetime.now().strftime('%d/%m/%Y')}\n\n"
-            f"Revisé {len(tickers)} tickers del mercado.\n"
-            f"Sin setups válidos esta mañana.\n\n"
-            f"✅ Estás protegida — esperar es correcto.\n"
-            f"_Sistema Maestro v4_"
+            f"Revise {len(tickers)} tickers del mercado.\n"
+            f"Sin setups validos esta manana.\n\n"
+            f"Estas protegida - esperar es correcto.\n"
+            f"Sistema Maestro v4 - Diario"
         )
 
 if __name__ == "__main__":

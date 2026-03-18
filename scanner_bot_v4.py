@@ -375,19 +375,35 @@ def analizar_ia(d, a, pos):
 # ── WhatsApp ──────────────────────────────────────────────────
 def send_wa(msg):
     try:
+        # Limpiar numero: solo digitos
+        numero = "".join(c for c in WHATSAPP_NUMBER if c.isdigit())
+        apikey = CALLMEBOT_APIKEY.strip()
+
+        # Diagnostico previo
+        print(f"  [WA] Numero: ...{numero[-4:]} | Apikey: ...{apikey[-4:]} | Chars msg: {len(msg)}")
+
         r = requests.get(
             "https://api.callmebot.com/whatsapp.php",
             params={
-                "phone":  WHATSAPP_NUMBER,
+                "phone":  numero,
                 "text":   msg,
-                "apikey": CALLMEBOT_APIKEY
+                "apikey": apikey
             },
             timeout=30
         )
-        print(f"WhatsApp status: {r.status_code} | respuesta: {r.text[:80]}")
+        print(f"  [WA] Status: {r.status_code} | Respuesta: {r.text[:120]}")
+
+        if r.status_code == 403:
+            print("  [WA] ERROR 403: API key vencida o numero incorrecto.")
+            print("  [WA] Solucion: envia 'I allow callmebot to send me messages'")
+            print("  [WA]           al +34 644 60 49 14 en WhatsApp y actualiza")
+            print("  [WA]           el Secret CALLMEBOT_APIKEY en GitHub.")
+        elif r.status_code == 200:
+            print("  [WA] Enviado OK")
+
         return r.status_code == 200
     except Exception as e:
-        print(f"Error WhatsApp DETALLE: {type(e).__name__}: {e}")
+        print(f"  [WA] Error de conexion: {type(e).__name__}: {e}")
         return False
 
 def build_msg(d, a, pos, ia):

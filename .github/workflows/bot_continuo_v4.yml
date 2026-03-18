@@ -21,12 +21,27 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # FIX 6: Guardar y restaurar el estado del dia entre corridas
+      # La key incluye la fecha → se resetea automaticamente cada dia
+      - name: Obtener fecha actual
+        id: fecha
+        run: echo "hoy=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Restaurar estado del dia
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lu_alertas_hoy.json
+          key: lu-estado-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
+          restore-keys: |
+            lu-estado-${{ steps.fecha.outputs.hoy }}-
 
       - name: Instalar librerias
         run: |
@@ -38,4 +53,4 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CALLMEBOT_APIKEY:  ${{ secrets.CALLMEBOT_APIKEY }}
           WHATSAPP_NUMBER:   ${{ secrets.WHATSAPP_NUMBER }}
-        run: python scanner_bot_v3.py
+        run: python scanner_bot_v4.py

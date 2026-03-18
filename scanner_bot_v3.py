@@ -268,19 +268,21 @@ def analizar_ia(d, a, pos):
 
 # ── WhatsApp ──────────────────────────────────────────────────
 def send_wa(msg):
+    """Envio via requests.get con params — maneja Ñ y tildes correctamente."""
     try:
-        # Encode explícito UTF-8 para la N con tilde y otros caracteres
-        msg_encoded = quote(msg.encode("utf-8"), safe="")
-        url = (
-            f"https://api.callmebot.com/whatsapp.php?"
-            f"phone={WHATSAPP_NUMBER}"
-            f"&text={msg_encoded}"
-            f"&apikey={CALLMEBOT_APIKEY}"
+        r = requests.get(
+            "https://api.callmebot.com/whatsapp.php",
+            params={
+                "phone":  WHATSAPP_NUMBER,
+                "text":   msg,
+                "apikey": CALLMEBOT_APIKEY
+            },
+            timeout=30
         )
-        r = requests.get(url, timeout=20)
+        print(f"WhatsApp status: {r.status_code} | respuesta: {r.text[:80]}")
         return r.status_code == 200
     except Exception as e:
-        print(f"Error WhatsApp: {e}")
+        print(f"Error WhatsApp DETALLE: {type(e).__name__}: {e}")
         return False
 
 def build_msg(d, a, pos, ia):

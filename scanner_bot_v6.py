@@ -1005,7 +1005,7 @@ def build_msg_corto(d, a, pos, ia, tendencia_semanal, dist_s8=None):
         f"<b>¿Sigue válida la señal?</b>\n"
         f"{zona_txt}\n"
         f"{rsi_ico} RSI: {rsi_v:.0f}  |  {vol_ico} Vol: {vol_r:.1f}x  |  Score: {score}/100\n"
-        f"MACD: {'🟢' if 'Bull' in d['macd_e'] else '🔴'} {d['macd_e']}\n"
+        f"{'🟢' if 'Bull' in d['macd_e'] else '🔴'} MACD: {d['macd_e']}\n"
         f"{tendencia_semanal}\n"
         f"{ia_txt}\n\n"
 

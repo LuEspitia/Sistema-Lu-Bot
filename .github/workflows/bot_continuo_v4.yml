@@ -65,9 +65,14 @@ jobs:
 
       - name: Correr el bot
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:     ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_TOKEN:        ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+          REDDIT_CLIENT_ID:      ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET:  ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USERNAME:       ${{ secrets.REDDIT_USERNAME }}
+          REDDIT_PASSWORD:       ${{ secrets.REDDIT_PASSWORD }}
+          STOCKTWITS_TOKEN:      ${{ secrets.STOCKTWITS_TOKEN }}
         run: python scanner_bot_v6.py
 
       - name: Subir backtest y diario

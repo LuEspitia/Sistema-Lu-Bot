@@ -2,20 +2,14 @@ name: Solares — Sistema Sirio Bot
 
 on:
   schedule:
-    # Escaneo de señales — cada 45 min en horario de mercado (ET)
-    - cron: '00 13 * * 1-5'   #  9:00am ET
-    - cron: '45 13 * * 1-5'   #  9:45am ET
+    # Escaneo cada hora en horario de mercado ET (UTC-4)
+    - cron: '30 13 * * 1-5'   #  9:30am ET — apertura
     - cron: '30 14 * * 1-5'   # 10:30am ET
-    - cron: '15 15 * * 1-5'   # 11:15am ET
-    - cron: '00 16 * * 1-5'   # 12:00pm ET
-    # Resumen 4H vela apertura — 30 min antes del cierre (1:00pm ET)
-    - cron: '00 17 * * 1-5'   #  1:00pm ET ← RESUMEN VELA 4H #1
-    - cron: '45 17 * * 1-5'   #  1:45pm ET
+    - cron: '30 15 * * 1-5'   # 11:30am ET
+    - cron: '00 17 * * 1-5'   #  1:00pm ET — resumen 4H vela 1
+    - cron: '30 17 * * 1-5'   #  1:30pm ET
     - cron: '30 18 * * 1-5'   #  2:30pm ET
-    # Resumen 4H vela cierre — 30 min antes del cierre de mercado (3:30pm ET)
-    - cron: '30 19 * * 1-5'   #  3:30pm ET ← RESUMEN VELA 4H #2
-    - cron: '15 20 * * 1-5'   #  4:15pm ET (post-market)
-    - cron: '00 21 * * 1-5'   #  5:00pm ET (post-market)
+    - cron: '00 20 * * 1-5'   #  4:00pm ET — cierre + resumen 4H vela 2
   workflow_dispatch:
 
 jobs:

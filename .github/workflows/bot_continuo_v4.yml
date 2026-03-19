@@ -38,10 +38,10 @@ jobs:
       - name: Restaurar estado del dia
         uses: actions/cache@v4
         with:
-          path: /tmp/lu_alertas_hoy.json
-          key: lu-estado-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
+          path: /tmp/sirio_alertas_hoy.json
+          key: sirio-estado-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
           restore-keys: |
-            lu-estado-${{ steps.fecha.outputs.hoy }}-
+            sirio-estado-${{ steps.fecha.outputs.hoy }}-
 
       - name: Instalar librerias
         run: |

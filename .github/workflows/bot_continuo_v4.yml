@@ -63,7 +63,7 @@ jobs:
       - name: Instalar librerias
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas numpy requests anthropic
+          pip install yfinance pandas numpy requests anthropic tradingview_ta
 
       - name: Correr el bot
         env:

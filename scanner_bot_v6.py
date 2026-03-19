@@ -841,10 +841,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     atr_pct= round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
     rsi_tag= ("débil" if rsi_v<CONFIG["rsi_min"]
               else "sobrecomprado" if rsi_v>CONFIG["rsi_max"] else "OK")
-    vol_r  = a["vol_r"]
-    vol_tag= (f"🔥 ALTO — {vol_r:.1f}x" if vol_r>=1.5
-              else f"✅ normal — {vol_r:.1f}x" if vol_r>=0.8
-              else f"⚠️ BAJO — {vol_r:.1f}x")
+    vol_r   = a["vol_r"]
     tardia_v = "\n⚠️ precio extendido &gt;2% sobre SMA8" if a.get("senal_tardia") else ""
     p1,p2,p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, vol_r)
     acc = pos["acc"]
@@ -854,12 +851,9 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     dist_ath = (f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
                 if ath>d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
     etf_ref  = get_sector_etf(d.get("sector","N/A"))
-    macd_ico = "🟢" if "Bull" in d["macd_e"] else "🔴"
-    ia_ico   = "⭐" if ia["prob"]>=70 else "🔔" if ia["prob"]>=55 else "👁"
+    ia_ico   = "⭐" if ia["prob"]>=70 else "🔔" if ia["prob"]>=55 else "🔭"
     score    = a.get("score",0)
     barra    = "█"*int(score/10)+"░"*(10-int(score/10))
-
-    # Prioridad de la señal
     prio_ico, prio_txt = calcular_prioridad(a, ia, d)
 
     def esc(t): return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -867,24 +861,30 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     razon = esc(ia.get("razon",""))
     alerta= esc(ia.get("alerta",""))
 
-    # ── Semáforo ATR por volatilidad ─────────────────────────
-    # ATR < 2%  = 🟢 baja volatilidad — movimiento predecible
-    # ATR 2-4%  = 🟡 volatilidad media — normal para swing
-    # ATR > 4%  = 🔴 alta volatilidad — cuidado con el tamaño
-    if atr_pct < 2.0:   atr_ico = "🟢"; atr_tag = "baja volatilidad"
-    elif atr_pct <= 4.0: atr_ico = "🟡"; atr_tag = "volatilidad media"
-    else:                atr_ico = "🔴"; atr_tag = "alta volatilidad — reduce tamaño"
+    # ── Semáforos — emoji SIEMPRE al inicio de línea ─────────
+    # MACD
+    macd_ico = "🟢" if "Bull" in d["macd_e"] else "🔴"
 
-    # Semáforo RSI
-    if 50 <= rsi_v <= 65:   rsi_ico = "🟢"
-    elif 45 <= rsi_v <= 72: rsi_ico = "🟡"
-    else:                    rsi_ico = "🔴"
+    # RSI — zona óptima 50-65
+    if 50 <= rsi_v <= 65:    rsi_ico = "🟢"
+    elif 45 <= rsi_v <= 72:  rsi_ico = "🟡"
+    else:                     rsi_ico = "🔴"
 
-    # Semáforo ADX
+    # ADX — fuerza de tendencia
     adx_v = d["adx"] if d["adx"] else 0
     if adx_v >= 25:    adx_ico = "🟢"
     elif adx_v >= 20:  adx_ico = "🟡"
     else:               adx_ico = "🔴"
+
+    # ATR — volatilidad diaria
+    if atr_pct < 2.0:    atr_ico = "🟢"; atr_tag = "baja volatilidad"
+    elif atr_pct <= 4.0: atr_ico = "🟡"; atr_tag = "volatilidad media"
+    else:                atr_ico = "🔴"; atr_tag = "alta — reduce tamaño"
+
+    # Volumen
+    if vol_r >= 1.5:    vol_ico = "🟢"; vol_tag = f"ALTO — {vol_r:.1f}x"
+    elif vol_r >= 0.8:  vol_ico = "🟡"; vol_tag = f"normal — {vol_r:.1f}x"
+    else:                vol_ico = "🔴"; vol_tag = f"BAJO — {vol_r:.1f}x"
 
     return (
         f"{prio_ico} <b>SISTEMA SIRIO — {prio_txt}</b>\n"
@@ -904,11 +904,11 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"{'✅' if a['c4'] else '❌'} SMA50  &gt; SMA200  {d['sma200']:.2f}\n\n"
 
         f"<b>📏 Indicadores</b>\n"
-        f"{macd_ico} MACD: {d['macd_e']}\n"
-        f"{rsi_ico} RSI: {rsi_v:.0f}  ({rsi_tag})\n"
-        f"{adx_ico} ADX: {d['adx_e']} ({adx_v:.0f})\n"
-        f"{atr_ico} ATR: {atr_pct}%  ({atr_tag})\n"
-        f"{vol_ico} Vol: {vol_tag}\n"
+        f"{macd_ico} MACD:  {d['macd_e']}\n"
+        f"{rsi_ico} RSI:   {rsi_v:.0f}  ({rsi_tag})\n"
+        f"{adx_ico} ADX:   {d['adx_e']} ({adx_v:.0f})\n"
+        f"{atr_ico} ATR:   {atr_pct}%  ({atr_tag})\n"
+        f"{vol_ico} Vol:   {vol_tag}\n"
         f"<i>(vs promedio últimos 20 días)</i>\n\n"
 
         f"<b>{d.get('vela_patron','Sin patrón')}</b>\n"

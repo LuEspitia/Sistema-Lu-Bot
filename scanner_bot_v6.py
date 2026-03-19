@@ -786,6 +786,25 @@ def send_telegram(msg):
     except Exception as ex:
         print(f"  [TG] Excepción: {ex}"); return False
 
+def calcular_prioridad(a, ia, d):
+    """
+    🔴 ALTA    — Score 75+, ADX≥25, vol≥1.5x, IA=ENTRAR, no tardía, RSI≤68
+    🟡 MEDIA   — Score 60-74, buenas condiciones, algún factor marginal
+    🟢 INFO    — Score 55-59, señal válida pero esperar confirmación
+    """
+    score  = a.get("score", 0)
+    adx    = d.get("adx", 0) or 0
+    vol_r  = a.get("vol_r", 0)
+    tardia = a.get("senal_tardia", False)
+    ia_ok  = "ENTRAR" in ia.get("senal", "").upper()
+    rsi_v  = d.get("rsi", 50) or 50
+    if score>=75 and adx>=25 and vol_r>=1.5 and not tardia and ia_ok and rsi_v<=68:
+        return "🔴", "ALTA PRIORIDAD"
+    elif score>=60 and adx>=20 and vol_r>=1.0:
+        return "🟡", "MEDIA PRIORIDAD"
+    else:
+        return "🟢", "INFORMATIVA — esperar confirmación"
+
 def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     hora   = hora_et(); pm_tag=" [PRE-MARKET]" if d.get("es_pm") else ""
     rsi_v  = d["rsi"] if d["rsi"] else 0

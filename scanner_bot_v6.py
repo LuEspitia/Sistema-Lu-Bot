@@ -799,11 +799,11 @@ def calcular_prioridad(a, ia, d):
     ia_ok  = "ENTRAR" in ia.get("senal", "").upper()
     rsi_v  = d.get("rsi", 50) or 50
     if score>=75 and adx>=25 and vol_r>=1.5 and not tardia and ia_ok and rsi_v<=68:
-        return "🔴", "ALTA PRIORIDAD"
+        return "⭐", "ALTA PRIORIDAD — entra"
     elif score>=60 and adx>=20 and vol_r>=1.0:
-        return "🟡", "MEDIA PRIORIDAD"
+        return "🔔", "MEDIA PRIORIDAD — revisa"
     else:
-        return "🟢", "INFORMATIVA — esperar confirmación"
+        return "🔭", "INFORMATIVA — observa"
 
 def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     hora   = hora_et(); pm_tag=" [PRE-MARKET]" if d.get("es_pm") else ""
@@ -826,7 +826,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
                 if ath>d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
     etf_ref  = get_sector_etf(d.get("sector","N/A"))
     macd_ico = "🟢" if "Bull" in d["macd_e"] else "🔴"
-    ia_ico   = "🚀" if ia["prob"]>=70 else "⚡" if ia["prob"]>=55 else "⏸"
+    ia_ico   = "⭐" if ia["prob"]>=70 else "🔔" if ia["prob"]>=55 else "👁"
     score    = a.get("score",0)
     barra    = "█"*int(score/10)+"░"*(10-int(score/10))
 
@@ -911,11 +911,11 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"Solares no gestiona fondos de terceros.</i>"
     )
 
-def build_msg_corto(d, a, pos, ia, tendencia_semanal):
+def build_msg_corto(d, a, pos, ia, tendencia_semanal, dist_s8=None):
     """
     Mensaje de ACTUALIZACIÓN — para tickers que ya recibieron el mensaje largo hoy.
-    Muestra solo los cambios relevantes desde la alerta original.
-    Claro para novatos y expertos: semáforo visual + números clave.
+    Solo se envía si el ticker está EN ZONA o CERCA (≤2% sobre SMA8).
+    Si está EXTENDIDA, el main ya lo filtra antes de llegar aquí.
     """
     hora     = hora_et()
     rsi_v    = d["rsi"] if d["rsi"] else 0
@@ -923,15 +923,17 @@ def build_msg_corto(d, a, pos, ia, tendencia_semanal):
     score    = a.get("score", 0)
     prio_ico, prio_txt = calcular_prioridad(a, ia, d)
 
-    # Distancia al SMA8 — clave para saber si está en zona de entrada
-    sma8v    = d["sma8"] or 0
-    dist_s8  = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
-    if dist_s8 <= 1.0:
+    # Zona de entrada
+    sma8v   = d["sma8"] or 0
+    if dist_s8 is None:
+        dist_s8 = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
+
+    if dist_s8 <= 0.5:
+        zona_txt = f"🎯 EN SMA8 — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f}) — ENTRADA IDEAL"
+    elif dist_s8 <= 1.0:
         zona_txt = f"✅ EN ZONA — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f})"
-    elif dist_s8 <= 2.0:
-        zona_txt = f"⚠️ CERCA — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f})"
     else:
-        zona_txt = f"❌ EXTENDIDA — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f})"
+        zona_txt = f"⚠️ CERCA del límite — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f})"
 
     # RSI semáforo
     rsi_ico = "🟢" if 50<=rsi_v<=65 else "🟡" if rsi_v<=72 else "🔴"
@@ -980,11 +982,11 @@ def build_msg_corto(d, a, pos, ia, tendencia_semanal):
     ia_ok  = "ENTRAR" in ia.get("senal", "").upper()
     rsi_v  = d.get("rsi", 50) or 50
     if (score>=75 and adx>=25 and vol_r>=1.5 and not tardia and ia_ok and rsi_v<=68):
-        return "🔴", "ALTA PRIORIDAD"
+        return "⭐", "ALTA PRIORIDAD — entra"
     elif score>=60 and adx>=20 and vol_r>=1.0:
-        return "🟡", "MEDIA PRIORIDAD"
+        return "🔔", "MEDIA PRIORIDAD — revisa"
     else:
-        return "🟢", "INFORMATIVA — esperar confirmación"
+        return "🔭", "INFORMATIVA — observa"
 
 def verificar_señal_activa(ticker):
     """
@@ -1161,12 +1163,24 @@ def main():
             print(f"    skip: {tend_sem}")
             razones["semanal"] = razones.get("semanal", 0) + 1; continue
 
-        # ── Señal válida ──────────────────────────────────────
+        # ── Señal válida — verificar zona de entrada ──────────
         largo_enviado = estado.get("largo_enviado", [])
         es_repetido   = ticker in largo_enviado
 
+        # Calcular distancia al SMA8
+        sma8v    = d.get("sma8") or 0
+        dist_s8  = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
+
+        # REGLA CLAVE: si está extendida (>2% sobre SMA8), no enviar nada
+        # No tiene sentido alertar una entrada que ya se fue
+        if dist_s8 > 2.0:
+            print(f"    skip señal: extendida {dist_s8:.1f}% sobre SMA8 — sin entrada")
+            razones["extendida"] = razones.get("extendida", 0) + 1
+            continue
+
         print(f"  ⭐ FAN 4/4 | Score {a['score']}/100 | "
-              f"{'ACTUALIZACIÓN' if es_repetido else 'NUEVA SEÑAL'}")
+              f"{'ACTUALIZACIÓN' if es_repetido else 'NUEVA SEÑAL'} | "
+              f"Zona: {dist_s8:.1f}% sobre SMA8")
 
         sc_sent, txt_sent, datos_sent = get_sentiment_completo(ticker)
         noticias_yh = []
@@ -1177,10 +1191,8 @@ def main():
         print(f"     IA: {ia['prob']}% — {ia['senal']}")
 
         if es_repetido:
-            # Mensaje corto de seguimiento
-            msg = build_msg_corto(d, a, pos, ia, tend_sem)
+            msg = build_msg_corto(d, a, pos, ia, tend_sem, dist_s8)
         else:
-            # Mensaje largo completo — primera vez del día
             msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
 
         ok = send_telegram(msg)

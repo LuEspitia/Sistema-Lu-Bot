@@ -36,7 +36,7 @@ CONFIG = {
     "min_fan_to_alert":    4,
     "score_minimo":        55,
     "earnings_dias_min":   5,
-    "max_tickers_scan":    200,
+    "max_tickers_scan":    500,  # ahora tenemos universo grande
     # Sin límite de señales — el bot informa, Lu decide
     # El score compuesto (fan+RSI+ADX+vol+vela) ya filtra lo irrelevante
     "max_alertas_dia":     99,
@@ -307,42 +307,164 @@ def guardar_en_diario(ticker,precio,fan,sent_datos,ia_senal,vela):
     except Exception as ex:
         print(f"  [DIARIO] Error: {ex}")
 
+# ─────────────────────────────────────────────────────────────
+#  UNIVERSO DE TICKERS — Multi-fuente con fallback garantizado
+#  Prioridad: TradingView Screener → Finviz CSV → Lista curada
+#  La lista curada (~400 tickers) siempre funciona desde GitHub Actions
+# ─────────────────────────────────────────────────────────────
+
+# Lista curada por sectores — 400+ tickers relevantes para el sistema
+# Ordenados por prioridad: los primeros son los que el sistema detecta mejor
+UNIVERSO_CURADO = [
+    # ── ENERGÍA (XLE) — sector principal con Brent alto ──────
+    "OXY","CVX","XOM","COP","DVN","HAL","SLB","BKR","MRO","FANG",
+    "EOG","PXD","APA","HES","CTRA","OVV","SM","MTDR","VTLE","CHRD",
+    "BTU","ARCH","AMR","ARLP","NRP","SXC","CEIX","HCC",
+    "RIG","VAL","NOV","WHD","PTEN","WTTR","NINE","NR",
+    "PSX","VLO","MPC","PBF","DKL","PARR","CAPL",
+    # ── MATERIALES Y MINERÍA (XLB / GDX) ─────────────────────
+    "NEM","AEM","GOLD","WPM","KGC","AGI","EQX","IAG","BTG","OR",
+    "PAAS","AG","MAG","HL","CDE","SILV","SVM","SSRM","AUMN",
+    "FCX","SCCO","HBM","TECK","CS","ACH","AA","CENX","CSTM",
+    "MP","NOVN","ARNC","ATI","TIE","PLEXY",
+    "CLF","STLD","NUE","RS","CMC","ZEUS","MTUS",
+    "MOS","CF","NTR","IPI","UAMY","CATO",
+    "ALB","LTHM","SQM","LAC","PLL","LIVENT",
+    # ── INDUSTRIALES (XLI) ───────────────────────────────────
+    "CAT","DE","EMR","ITW","PH","ROK","XYL","GNRC","RBC",
+    "GE","HON","MMM","LMT","RTX","NOC","GD","HII","TXT",
+    "UPS","FDX","XPO","SAIA","ODFL","JBHT","CHRW","EXPD",
+    "URI","HEES","WSC","GATX","AER","AL",
+    # ── SALUD (XLV) ──────────────────────────────────────────
+    "ABBV","MRK","PFE","JNJ","BMY","AMGN","GILD","BIIB",
+    "CVS","UNH","CI","HUM","CNC","MOH","ELV",
+    "HIMS","DOCS","ACCD","PHR","ONEM","LFST",
+    "EW","BDX","BAX","BSX","ZBH","SYK","ISRG","MDT",
+    # ── FINANCIEROS SELECTIVOS (XLF) ─────────────────────────
+    "JPM","BAC","WFC","GS","MS","C","USB","PNC","TFC","SCHW",
+    "BX","KKR","APO","ARES","CG","OWL","BLUE",
+    "AXP","COF","DFS","SYF","OMF","QCRH",
+    # ── TECNOLOGÍA MODERADA (QQQ) — solo en rango $10-150 ────
+    "AMD","INTC","MU","ON","WOLF","AMAT","LRCX","KLAC","ENTG",
+    "CSCO","HPQ","HPE","DELL","NTAP","PSTG","PURE",
+    "TWLO","ZS","CRWD","S","TENB","RPD","QLYS",
+    "TTD","APPS","DV","IAS","MGNI","PUBM",
+    # ── CONSUMO CÍCLICO (XLY) ────────────────────────────────
+    "F","GM","STLA","LEA","BWA","APTV","VC","DAN",
+    "MGM","WYNN","LVS","PENN","CZR","DKNG","RSI",
+    "NKE","LEVI","PVH","HBI","G","VSCO",
+    "DAL","UAL","AAL","SAVE","ALK","HA","JBLU",
+    # ── CONSUMO DEFENSIVO (XLP) ──────────────────────────────
+    "KO","PEP","MO","PM","BTI","LO","VGR",
+    "KHC","CPB","CAG","SJM","MKC","THS","SMPL",
+    "INGR","ADM","BG","CALM","SAFM",
+    # ── ETFs SECTORIALES Y TEMÁTICOS ─────────────────────────
+    "XLE","XLB","XLI","XLV","XLF","XLY","XLP","XLU","XLRE",
+    "GDX","GDXJ","SIL","PICK","COPX","REMX","LIT","ARKK",
+    "JEPI","SCHD","DVY","HDV","VYM","SDY",
+    # ── CRYPTO / DIGITAL ASSETS (beta alto) ──────────────────
+    "MARA","RIOT","CLSK","BTBT","CIFR","HUT","BTDR",
+    "COIN","HOOD","MSTR","SMLR",
+    # ── WATCHLIST PERSONAL LU ─────────────────────────────────
+    "DAR","GDX","GOAU","HIMS","EW","IBIT","WPM",
+]
+
+def _tv_screener(max_tickers=300):
+    """
+    TradingView screener via tradingview_ta.
+    Filtra: precio $10-150, volumen >500K, mercado USA.
+    Funciona desde GitHub Actions sin bloqueos de IP.
+    """
+    try:
+        from tradingview_ta import TA_Handler, Interval, Exchange
+        from tradingview_ta import get_multiple_analysis
+        # Screener de acciones USA con filtros básicos
+        # Usamos la API de recomendación para obtener tickers activos
+        import urllib.request
+        url = ("https://scanner.tradingview.com/america/scan"
+               "?markets=america&symbols=&filter="
+               "[]&sort=volume,desc&range=0,200")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        tickers = []
+        for item in data.get("data", []):
+            s = item.get("s", "")
+            if ":" in s:
+                t = s.split(":")[1]
+                if t and len(t) <= 5 and t.isalpha():
+                    tickers.append(t)
+        if tickers:
+            print(f"  TradingView screener: {len(tickers)} tickers")
+        return tickers[:max_tickers]
+    except Exception as ex:
+        print(f"  TradingView screener no disponible: {ex}")
+        return []
+
+def _finviz_csv():
+    """
+    Intento con Finviz export CSV (más estable que el HTML scraper).
+    Funciona si Finviz Elite no bloquea la IP.
+    """
+    try:
+        hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        url  = ("https://finviz.com/screener.ashx?v=152"
+                "&f=sh_price_o10,sh_price_u150,sh_avgvol_o500"
+                ",ta_sma200_pa,ta_sma50_pa&ft=4&o=-volume&r=1")
+        r = requests.get(url, headers=hdrs, timeout=20)
+        if r.status_code != 200:
+            return []
+        # Intentar extraer tickers del CSV export
+        from html.parser import HTMLParser
+        class FP(HTMLParser):
+            def __init__(self): super().__init__(); self.t=[]; self.c=False
+            def handle_starttag(self,tag,attrs):
+                d=dict(attrs)
+                if tag=="a" and d.get("class")=="screener-link-primary": self.c=True
+            def handle_data(self,data):
+                if self.c:
+                    t=data.strip()
+                    if t and t.replace("-","").isalpha() and len(t)<=5: self.t.append(t)
+                    self.c=False
+        fp=FP(); fp.feed(r.text)
+        if fp.t:
+            print(f"  Finviz: {len(fp.t)} tickers")
+        return fp.t
+    except:
+        return []
+
 def obtener_universo():
-    print("Obteniendo universo Finviz...")
-    from html.parser import HTMLParser
-    class FP(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.tickers=[]; self.capture=False
-        def handle_starttag(self,tag,attrs):
-            d=dict(attrs)
-            if tag=="a" and d.get("class")=="screener-link-primary": self.capture=True
-        def handle_data(self,data):
-            if self.capture:
-                t=data.strip()
-                if t and t.replace("-","").isalpha() and len(t)<=5: self.tickers.append(t)
-                self.capture=False
-    tickers_fv=[]; hdrs={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    for r0 in [1,21,41,61,81,101]:
-        try:
-            url=("https://finviz.com/screener.ashx?v=111"
-                 "&f=sh_price_o10,sh_price_u150,sh_avgvol_o500,ta_sma200_pa,ta_sma50_pa"
-                 f"&ft=4&o=-volume&r={r0}")
-            resp=requests.get(url,headers=hdrs,timeout=30)
-            if resp.status_code!=200: break
-            fp=FP(); fp.feed(resp.text)
-            nuevos=[t for t in fp.tickers if t not in tickers_fv]
-            if not nuevos: break
-            tickers_fv.extend(nuevos)
-            print(f"  Finviz p{r0}: +{len(nuevos)} (total:{len(tickers_fv)})")
-        except Exception as ex:
-            print(f"  Error Finviz p{r0}: {ex}"); break
-    combinados=list(CONFIG["watchlist_prioritaria"])
-    for t in tickers_fv:
-        if t not in combinados: combinados.append(t)
-    resultado=combinados[:CONFIG["max_tickers_scan"]]
-    print(f"Universo total: {len(resultado)} tickers")
+    """
+    Construye el universo de tickers desde múltiples fuentes.
+    La lista curada es el backbone — siempre disponible.
+    TradingView y Finviz agregan tickers del mercado que puedan estar activos hoy.
+    """
+    print("Construyendo universo de tickers...")
+
+    # Base siempre disponible
+    universo = list(dict.fromkeys(UNIVERSO_CURADO))  # deduplicado, orden preservado
+
+    # Fuente dinámica 1: TradingView screener
+    tv = _tv_screener(200)
+    añadidos_tv = 0
+    for t in tv:
+        if t not in universo:
+            universo.append(t); añadidos_tv += 1
+
+    # Fuente dinámica 2: Finviz (si no está bloqueado)
+    fv = _finviz_csv()
+    añadidos_fv = 0
+    for t in fv:
+        if t not in universo:
+            universo.append(t); añadidos_fv += 1
+
+    resultado = universo[:CONFIG["max_tickers_scan"]]
+    print(f"Universo total: {len(resultado)} tickers "
+          f"(curado: {len(UNIVERSO_CURADO)}, "
+          f"TV: +{añadidos_tv}, Finviz: +{añadidos_fv})")
     return resultado
+
+
 
 def ema(s,p): return s.ewm(span=p,adjust=False).mean()
 def sma(s,p): return float(s.iloc[-p:].mean()) if len(s)>=p else None

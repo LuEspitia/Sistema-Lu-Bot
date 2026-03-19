@@ -601,9 +601,12 @@ def obtener_datos(ticker):
         ath_52w=float(h.iloc[-252:].max()) if len(h)>=252 else float(h.max())
         mv,sv,hv_m,me=calc_macd(c); av,dip,dim,ae=calc_adx(h,l,c)
         atr_val=calc_atr(h,l,c); vela_patron,vela_fuerza=detectar_velas(hist)
-        nombre=ticker; sector="N/A"
+        nombre=ticker; sector="N/A"; beta=None
         try:
-            info=s.info; nombre=info.get("shortName",ticker); sector=info.get("sector","N/A")
+            info=s.info
+            nombre=info.get("shortName",ticker)
+            sector=info.get("sector","N/A")
+            beta=info.get("beta", None)
         except: pass
         return {"ticker":ticker,"nombre":nombre,"sector":sector,
                 "precio":precio,"prev":prev,"pct":pct,"es_pm":es_pm,
@@ -611,6 +614,7 @@ def obtener_datos(ticker):
                 "ema8":float(ema(c,8).iloc[-1]),
                 "rsi":calc_rsi(c),"macd":mv,"macd_s":sv,"macd_h":hv_m,"macd_e":me,
                 "adx":av,"dip":dip,"dim":dim,"adx_e":ae,"atr":atr_val,
+                "beta":beta,
                 "vh":vh,"vh_proy":vh_proy,"vp":vp,"vol_r":vol_r,"ath_52w":ath_52w,
                 "vela_patron":vela_patron,"vela_fuerza":vela_fuerza,"error":None}
     except Exception as ex:
@@ -644,17 +648,42 @@ def analizar(d):
             "en_rango":en_rango,"vol_r":vol_r,"vol_ok":vol_ok,"senal_tardia":tardia,
             "score":score,"score_det":f"Fan:{pts_fan}+RSI:{pts_rsi}+ADX:{pts_adx}+Vol:{pts_vol}+Vela:{pts_vela}"}
 
-def posicion(precio,ath_52w=None):
-    sp=CONFIG["stop_loss_pct"]/100; stop=round(precio*(1-sp),2); rx=precio-stop
-    acc=max(1,int(CONFIG["riesgo_fijo_usd"]/rx)); tot=round(acc*precio,2); perd=round(acc*rx,2)
-    t1=round(precio+1*rx,2); t2=round(precio+2*rx,2); t3=round(precio+3*rx,2)
-    if ath_52w and ath_52w>precio:
-        techo=round(ath_52w*0.98,2)
-        if techo>t1:
-            if t2>techo: t2=techo
-            if t3>techo: t3=techo
-    rr=round((t1-precio)/rx,2)
-    return {"acc":acc,"tot":tot,"stop":stop,"perd":perd,"t1":t1,"t2":t2,"t3":t3,"rx":rx,"rr":rr}
+def posicion(precio, ath_52w=None, atr=None, beta=None):
+    """
+    Stop calculado con ATR + Beta — más preciso que el % fijo.
+    - Beta alta (>1.5): stop más amplio (2.0x ATR) — acción volátil
+    - Beta normal (0.8-1.5): stop estándar (1.5x ATR)
+    - Beta baja (<0.8): stop más ajustado (1.2x ATR) — acción estable
+    - Si no hay ATR disponible: usa 6% fijo como respaldo
+    """
+    if atr and atr > 0 and precio > 0:
+        b = beta if beta and beta > 0 else 1.0
+        if b >= 1.5:    mult = 2.0   # volátil — stop más amplio
+        elif b >= 0.8:  mult = 1.5   # normal
+        else:           mult = 1.2   # estable — stop ajustado
+        riesgo_atr = atr * mult
+        # No exceder 8% ni ser menor que 3% del precio
+        riesgo_atr = max(precio*0.03, min(precio*0.08, riesgo_atr))
+        stop = round(precio - riesgo_atr, 2)
+    else:
+        # Respaldo: 6% fijo
+        stop = round(precio*(1-CONFIG["stop_loss_pct"]/100), 2)
+
+    rx  = precio - stop
+    acc = max(1, int(CONFIG["riesgo_fijo_usd"] / rx))
+    tot = round(acc*precio, 2)
+    perd= round(acc*rx, 2)
+    t1  = round(precio + 1*rx, 2)
+    t2  = round(precio + 2*rx, 2)
+    t3  = round(precio + 3*rx, 2)
+    if ath_52w and ath_52w > precio:
+        techo = round(ath_52w*0.98, 2)
+        if techo > t1:
+            if t2 > techo: t2 = techo
+            if t3 > techo: t3 = techo
+    rr = round((t1-precio)/rx, 2)
+    return {"acc":acc,"tot":tot,"stop":stop,"perd":perd,
+            "t1":t1,"t2":t2,"t3":t3,"rx":rx,"rr":rr}
 
 def calc_probabilidades(fan,adx,rsi,vol_r):
     base={4:(68,42,25),3:(52,32,18),2:(38,20,10)}
@@ -838,6 +867,25 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     razon = esc(ia.get("razon",""))
     alerta= esc(ia.get("alerta",""))
 
+    # ── Semáforo ATR por volatilidad ─────────────────────────
+    # ATR < 2%  = 🟢 baja volatilidad — movimiento predecible
+    # ATR 2-4%  = 🟡 volatilidad media — normal para swing
+    # ATR > 4%  = 🔴 alta volatilidad — cuidado con el tamaño
+    if atr_pct < 2.0:   atr_ico = "🟢"; atr_tag = "baja volatilidad"
+    elif atr_pct <= 4.0: atr_ico = "🟡"; atr_tag = "volatilidad media"
+    else:                atr_ico = "🔴"; atr_tag = "alta volatilidad — reduce tamaño"
+
+    # Semáforo RSI
+    if 50 <= rsi_v <= 65:   rsi_ico = "🟢"
+    elif 45 <= rsi_v <= 72: rsi_ico = "🟡"
+    else:                    rsi_ico = "🔴"
+
+    # Semáforo ADX
+    adx_v = d["adx"] if d["adx"] else 0
+    if adx_v >= 25:    adx_ico = "🟢"
+    elif adx_v >= 20:  adx_ico = "🟡"
+    else:               adx_ico = "🔴"
+
     return (
         f"{prio_ico} <b>SISTEMA SIRIO — {prio_txt}</b>\n"
         f"🌟 <b>Solares Trading</b>\n"
@@ -855,12 +903,12 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"{'✅' if a['c3'] else '❌'} SMA20  &gt; SMA50   {d['sma50']:.2f}\n"
         f"{'✅' if a['c4'] else '❌'} SMA50  &gt; SMA200  {d['sma200']:.2f}\n\n"
 
-        f"<b>🔬 Indicadores</b>\n"
-        f"MACD: {macd_ico} {d['macd_e']}\n"
-        f"RSI:  {rsi_v:.0f}  ({rsi_tag})\n"
-        f"ADX:  {d['adx_e']} ({d['adx']:.0f})\n"
-        f"ATR:  {atr_pct}% diario esperado\n"
-        f"Vol:  {vol_tag}\n"
+        f"<b>📏 Indicadores</b>\n"
+        f"{macd_ico} MACD: {d['macd_e']}\n"
+        f"{rsi_ico} RSI: {rsi_v:.0f}  ({rsi_tag})\n"
+        f"{adx_ico} ADX: {d['adx_e']} ({adx_v:.0f})\n"
+        f"{atr_ico} ATR: {atr_pct}%  ({atr_tag})\n"
+        f"{vol_ico} Vol: {vol_tag}\n"
         f"<i>(vs promedio últimos 20 días)</i>\n\n"
 
         f"<b>{d.get('vela_patron','Sin patrón')}</b>\n"
@@ -1186,7 +1234,7 @@ def main():
         noticias_yh = []
         if datos_sent.get("yahoo"):
             noticias_yh = datos_sent["yahoo"].get("titulares", [])
-        pos = posicion(d["precio"], d.get("ath_52w"))
+        pos = posicion(d["precio"], d.get("ath_52w"), d.get("atr"), d.get("beta"))
         ia  = analizar_ia(d, a, pos, sc_sent, tend_sem, noticias_yh)
         print(f"     IA: {ia['prob']}% — {ia['senal']}")
 

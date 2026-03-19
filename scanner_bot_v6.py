@@ -904,7 +904,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"{'✅' if a['c4'] else '❌'} SMA50  &gt; SMA200  {d['sma200']:.2f}\n\n"
 
         f"<b>📏 Indicadores</b>\n"
-        f"{macd_ico} MACD:  {d['macd_e']}\n"
+        f"{macd_ico} MACD: {d['macd_e']}\n"
         f"{rsi_ico} RSI:   {rsi_v:.0f}  ({rsi_tag})\n"
         f"{adx_ico} ADX:   {d['adx_e']} ({adx_v:.0f})\n"
         f"{atr_ico} ATR:   {atr_pct}%  ({atr_tag})\n"

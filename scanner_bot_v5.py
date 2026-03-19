@@ -186,63 +186,53 @@ def proyectar_volumen(vh, vp):
         return (vh/vp if vp>0 else 0), vh
 
 # ── Sentiment redes sociales ──────────────────────────────────
-# Nuevo en v5: StockTwits (gratis, sin API key) + Reddit WSB (gratis, sin API key)
+# ── Sentiment via noticias yfinance (no requiere API externa) ─
+# GitHub Actions bloquea StockTwits/Reddit. Usamos las noticias
+# de yfinance (Yahoo Finance) que siempre funcionan, y dejamos
+# que Claude interprete el tono y tema relevante.
 
-def get_stocktwits_sentiment(ticker):
+def get_noticias_ticker(ticker):
+    """Obtiene titulares recientes de Yahoo Finance via yfinance."""
     try:
-        url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
-        r   = requests.get(url, timeout=10,
-                           headers={"User-Agent": "SistemaSirio/1.0"})
-        if r.status_code != 200: return None
-        msgs  = r.json().get("messages", [])
-        if not msgs: return None
-        bulls = sum(1 for m in msgs
-                    if m.get("entities",{}).get("sentiment",{}).get("basic")=="Bullish")
-        bears = sum(1 for m in msgs
-                    if m.get("entities",{}).get("sentiment",{}).get("basic")=="Bearish")
-        total = bulls+bears
-        if total==0:
-            return {"score":50,"label":"Neutral","bulls":0,"bears":0,"n":len(msgs)}
-        score = int(bulls/total*100)
-        label = ("Bullish" if score>=65 else "Lev.Bull" if score>=55
-                 else "Neutral" if score>=45 else "Lev.Bear" if score>=35 else "Bearish")
-        return {"score":score,"label":label,"bulls":bulls,"bears":bears,"n":len(msgs)}
+        noticias = yf.Ticker(ticker).news
+        if not noticias:
+            return []
+        # Tomar las 5 mas recientes
+        titulares = []
+        for n in noticias[:5]:
+            t = n.get("title", "")
+            if t:
+                titulares.append(t)
+        return titulares
     except:
-        return None
-
-def get_reddit_sentiment(ticker):
-    try:
-        url  = (f"https://www.reddit.com/r/wallstreetbets/search.json"
-                f"?q={ticker}&sort=new&limit=20&t=day")
-        r    = requests.get(url, timeout=10,
-                            headers={"User-Agent": "SistemaSirio/1.0"})
-        if r.status_code != 200: return None
-        posts = r.json().get("data",{}).get("children",[])
-        if not posts: return None
-        n    = len(posts)
-        avg  = sum(p["data"].get("upvote_ratio",0.5) for p in posts)/n
-        label= ("Bullish" if avg>=0.72 else "Lev.Bull" if avg>=0.55
-                else "Neutral" if avg>=0.45 else "Bearish")
-        return {"n":n,"upvote":round(avg,2),"label":label}
-    except:
-        return None
+        return []
 
 def get_sentiment_resumen(ticker):
-    st  = get_stocktwits_sentiment(ticker)
-    wbs = get_reddit_sentiment(ticker)
-    lineas=[]; scores=[]
-    if st:
-        lineas.append(f"StockTwits: {st['label']} ({st['score']}% bull, {st['n']} msgs)")
-        scores.append(st["score"])
-    if wbs and wbs["n"]>0:
-        lineas.append(f"Reddit WSB: {wbs['label']} ({wbs['n']} posts hoy)")
-        scores.append(int(wbs["upvote"]*100))
-    if not lineas:
-        return None, "Sin datos de sentiment"
-    sp   = int(sum(scores)/len(scores))
-    etiq = ("BULLISH" if sp>=65 else "Lev.Bullish" if sp>=55
-            else "Neutral" if sp>=45 else "Lev.Bearish" if sp>=35 else "BEARISH")
-    return sp, f"{etiq} ({sp}%)\n"+"\n".join(lineas)
+    """Sentiment basado en titulares recientes de Yahoo Finance."""
+    titulares = get_noticias_ticker(ticker)
+    if not titulares:
+        return None, "Sin noticias recientes en Yahoo Finance"
+    texto_noticias = " | ".join(titulares[:3])
+    # Score simple por palabras clave (luego la IA da el analisis profundo)
+    positivas = ["beat","surge","jump","rise","higher","buy","upgrade","growth",
+                 "strong","record","profit","rally","up","gain","outperform"]
+    negativas = ["miss","fall","drop","decline","lower","sell","downgrade","loss",
+                 "weak","cut","down","risk","concern","warn","below"]
+    text_lower = texto_noticias.lower()
+    pos = sum(1 for w in positivas if w in text_lower)
+    neg = sum(1 for w in negativas if w in text_lower)
+    total = pos + neg
+    if total == 0:
+        score = 50; etiq = "Neutral"
+    else:
+        score = int(pos / total * 100)
+        etiq = ("Bullish" if score >= 65 else "Lev.Bullish" if score >= 55
+                else "Neutral" if score >= 45 else "Lev.Bearish" if score >= 35
+                else "Bearish")
+    resumen = f"{etiq} ({score}% bullish — {len(titulares)} noticias)\n"
+    for t in titulares[:3]:
+        resumen += f"- {t[:80]}\n"
+    return score, resumen.strip()
 
 # ── Datos ─────────────────────────────────────────────────────
 def obtener_datos(ticker):
@@ -325,13 +315,52 @@ def posicion(precio, ath_52w=None):
     acc=max(1,int(CONFIG["riesgo_fijo_usd"]/rx))
     tot=round(acc*precio,2); perd=round(acc*rx,2)
     t1=round(precio+1*rx,2); t2=round(precio+2*rx,2); t3=round(precio+3*rx,2)
-    if ath_52w and ath_52w>precio:
-        techo=round(ath_52w*0.98,2)
-        if t2>techo: t2=techo
-        if t3>techo: t3=techo
+    # BUG FIX: el techo (98% ATH) NUNCA puede bajar T2/T3 por debajo de T1
+    # Ejemplo HAL: ATH=$36.85, techo=$36.11, T1=$38.39 -> antes T2=T3=$36.11 (absurdo)
+    # Ahora: si techo < T1, no se aplica el cap
+    if ath_52w and ath_52w > precio:
+        techo = round(ath_52w * 0.98, 2)
+        if techo > t1:
+            if t2 > techo: t2 = techo
+            if t3 > techo: t3 = techo
     rr=round((t1-precio)/rx,2)
     return {"acc":acc,"tot":tot,"stop":stop,"perd":perd,
             "t1":t1,"t2":t2,"t3":t3,"rx":rx,"rr":rr}
+
+# Mapa sector -> ETF de referencia para contexto de IA
+SECTOR_ETF = {
+    "energy":               "XLE",
+    "technology":           "QQQ",
+    "healthcare":           "XLV",
+    "financial":            "XLF",
+    "basic materials":      "XLB",
+    "basic mate":           "XLB",
+    "consumer cyclical":    "XLY",
+    "consumer d":           "XLY",
+    "consumer defensive":   "XLP",
+    "industrials":          "XLI",
+    "real estate":          "XLRE",
+    "utilities":            "XLU",
+    "communication":        "XLC",
+}
+
+def get_sector_etf(sector):
+    s = sector.lower()
+    for k, v in SECTOR_ETF.items():
+        if k in s:
+            return v
+    return "SPY"
+
+def get_vix():
+    try:
+        fi = yf.Ticker("^VIX").fast_info
+        v  = float(getattr(fi, "last_price", None) or 0)
+        if v > 0:
+            nivel = "ALTO/MIEDO" if v > 25 else "MODERADO" if v > 18 else "BAJO/CALMA"
+            return round(v, 1), nivel
+    except:
+        pass
+    return None, "N/D"
 
 def calc_probabilidades(fan,adx,rsi,vol_r):
     base={4:(68,42,25),3:(52,32,18),2:(38,20,10)}
@@ -346,48 +375,71 @@ def calc_probabilidades(fan,adx,rsi,vol_r):
     return max(5,min(82,p1)),max(5,min(65,p2)),max(5,min(50,p3))
 
 # ── IA ────────────────────────────────────────────────────────
-def analizar_ia(d,a,pos,sentiment_score):
+def analizar_ia(d, a, pos, sentiment_score):
     if not CLAUDE_API_KEY:
         return {"prob":0,"senal":"SIN IA","razon":"Sin API key","alerta":""}
     try:
-        client=anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        rsi_v=d["rsi"] if d["rsi"] else 0
-        atr_v=d["atr"] if d["atr"] else 0
-        sent_s=f"{sentiment_score}%" if sentiment_score else "N/D"
-        prompt=(
-            f"Analiza {d['ticker']} ({d.get('sector','N/A')}) Sistema Sirio.\n"
-            f"Precio: {d['precio']:.2f} ({d['pct']:+.2f}%) | Fan SMA: {a['fan']}/4\n"
-            f"MACD: {d['macd_e']} | RSI: {rsi_v:.0f} | ADX: {d['adx_e']} ({d['adx']:.0f})\n"
-            f"ATR: {atr_v:.2f} | Vol: {a['vol_r']:.1f}x prom.20d\n"
-            f"Sentiment redes (bullish%): {sent_s}\n"
-            f"Stop: {pos['stop']:.2f} | T1: {pos['t1']:.2f} | R/R: {pos['rr']:.1f}x\n\n"
-            f"Responde SIN tildes SIN acentos formato EXACTO:\n"
+        client     = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+        rsi_v      = d["rsi"] if d["rsi"] else 0
+        atr_v      = d["atr"] if d["atr"] else 0
+        atr_pct    = round(atr_v / d["precio"] * 100, 1) if d["precio"] > 0 else 0
+        sent_s     = f"{sentiment_score}%" if sentiment_score else "N/D"
+        sector     = d.get("sector", "N/A")
+        etf_ref    = get_sector_etf(sector)
+        vix_v, vix_nivel = get_vix()
+        vix_str    = f"{vix_v} ({vix_nivel})" if vix_v else "N/D"
+        tardia_str = "SI - precio >2% sobre SMA8" if a.get("senal_tardia") else "NO"
+
+        prompt = (
+            f"Analiza esta oportunidad de swing trading (5-10 dias).\n\n"
+            f"TICKER: {d['ticker']} | Sector: {sector} | ETF referencia: {etf_ref}\n"
+            f"Precio: {d['precio']:.2f} USD ({d['pct']:+.2f}%)\n"
+            f"Entrada tardia (>2% sobre SMA8): {tardia_str}\n\n"
+            f"TECNICOS:\n"
+            f"Abanico SMA: {a['fan']}/4 | MACD: {d['macd_e']}\n"
+            f"RSI: {rsi_v:.0f} | ADX: {d['adx_e']} ({d['adx']:.0f})\n"
+            f"ATR: {atr_v:.2f} USD ({atr_pct}% del precio — volatilidad diaria esperada)\n"
+            f"Volumen hoy vs prom.20d: {a['vol_r']:.1f}x\n\n"
+            f"CONTEXTO MACRO:\n"
+            f"VIX actual: {vix_str}\n"
+            f"Sentiment redes (% bullish): {sent_s}\n"
+            f"Stop -1R: {pos['stop']:.2f} | T1 +1R: {pos['t1']:.2f} | R/R: {pos['rr']:.1f}x\n\n"
+            f"Responde SIN tildes, SIN acentos, en formato EXACTO:\n"
             f"PROBABILIDAD: [0-100]\n"
             f"SIGNAL: [ENTRAR / ESPERAR / NO APLICA]\n"
-            f"RAZON: [max 2 frases]\n"
-            f"ALERTA: [nivel o evento clave]"
+            f"CONTEXTO: [1 frase sobre VIX + como se mueve {etf_ref} afecta a {d['ticker']} "
+            f"+ tema o catalizador relevante para este sector ahora mismo]\n"
+            f"RAZON: [1 frase sobre el setup tecnico especifico]\n"
+            f"ALERTA: [nivel de precio o evento clave a vigilar]"
         )
-        msg=client.messages.create(
-            model="claude-sonnet-4-20250514",max_tokens=250,
-            system="Analizador Sistema Sirio — Solares Trading. Responde en formato exacto. SIN tildes SIN acentos SIN caracteres especiales.",
-            messages=[{"role":"user","content":prompt}]
+        msg = client.messages.create(
+            model="claude-sonnet-4-20250514", max_tokens=300,
+            system=(
+                "Eres el analizador del Sistema Sirio de Solares Trading. "
+                "Conoces correlaciones entre sectores, ETFs y macro. "
+                "Eres experto en contexto de mercado: VIX, rotacion sectorial, noticias que mueven sectores. "
+                "Responde SOLO en el formato indicado. SIN tildes, SIN acentos, SIN caracteres especiales."
+            ),
+            messages=[{"role": "user", "content": prompt}]
         )
-        txt=msg.content[0].text
-        pr,se,ra,al=0,"ESPERAR","",""
+        txt = msg.content[0].text
+        pr, se, ctx, ra, al = 0, "ESPERAR", "", "", ""
         for ln in txt.splitlines():
-            ln=ln.strip()
+            ln = ln.strip()
             if ln.startswith("PROBABILIDAD:"):
-                try: pr=int(ln.split(":")[1].strip().replace("%",""))
+                try: pr = int(ln.split(":")[1].strip().replace("%",""))
                 except: pass
             elif ln.upper().startswith("SIGNAL:"):
-                se=ln.split(":",1)[1].strip()
+                se = ln.split(":",1)[1].strip()
+            elif ln.upper().startswith("CONTEXTO:"):
+                ctx = ln.split(":",1)[1].strip()
             elif ln.upper().startswith("RAZON:"):
-                ra=ln.split(":",1)[1].strip()
+                ra = ln.split(":",1)[1].strip()
             elif ln.startswith("ALERTA:"):
-                al=ln.split(":",1)[1].strip()
-        return {"prob":pr,"senal":se,"razon":ra,"alerta":al}
+                al = ln.split(":",1)[1].strip()
+        return {"prob":pr,"senal":se,"contexto":ctx,"razon":ra,"alerta":al}
     except Exception as ex:
-        return {"prob":0,"senal":"ERROR","razon":str(ex)[:80],"alerta":""}
+        return {"prob":0,"senal":"ERROR","contexto":"","razon":str(ex)[:80],"alerta":""}
 
 # ── Telegram ──────────────────────────────────────────────────
 def send_telegram(msg):
@@ -416,33 +468,58 @@ def send_telegram(msg):
         return False
 
 # FIX 2: nombre SISTEMA SIRIO — Solares (antes era SISTEMA LU)
-def build_msg(d,a,pos,ia,sent_texto):
-    hora=hora_et()
-    pm_tag=" [PRE-MARKET]" if d.get("es_pm") else ""
-    ef="OK 4/4" if a["fan"]==4 else f"PARCIAL {a['fan']}/4"
-    rsi_v=d["rsi"] if d["rsi"] else 0
-    atr_v=d["atr"] if d["atr"] else 0
-    atr_pct=(atr_v/d["precio"]*100) if d["precio"]>0 else 0
-    if rsi_v<CONFIG["rsi_min"]:    rsi_tag="debil"
-    elif rsi_v>CONFIG["rsi_max"]:  rsi_tag="sobrecomprado"
-    elif rsi_v==CONFIG["rsi_max"]: rsi_tag="en el limite"
-    else:                           rsi_tag="OK"
-    vol_r=a["vol_r"]
-    vol_tag="OK" if vol_r>=1.5 else "bajo" if vol_r<0.8 else "moderado"
-    tardia_v="  AVISO >2% sobre SMA8" if a.get("senal_tardia") else ""
-    p1,p2,p3=calc_probabilidades(a["fan"],d["adx"],rsi_v,vol_r)
-    acc=pos["acc"]
-    s25=max(1,round(acc*0.25)); s30=max(1,round(acc*0.30))
-    s20=max(1,round(acc*0.20)); s25b=max(0,acc-s25-s30-s20)
-    ath=d.get("ath_52w",0)
-    dist_ath=(f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
-              if ath>d["precio"] else f"ATH 52s: {ath:.2f}  (en zona ATH)")
+def build_msg(d, a, pos, ia, sent_texto):
+    hora    = hora_et()
+    pm_tag  = " [PRE-MARKET]" if d.get("es_pm") else ""
+    ef      = "OK 4/4" if a["fan"]==4 else f"PARCIAL {a['fan']}/4"
+    rsi_v   = d["rsi"] if d["rsi"] else 0
+    atr_v   = d["atr"] if d["atr"] else 0
+    # FIX 3: ATR solo en % (mas util que el valor absoluto en USD)
+    atr_pct = round(atr_v / d["precio"] * 100, 1) if d["precio"] > 0 else 0
+
+    if rsi_v < CONFIG["rsi_min"]:    rsi_tag = "debil"
+    elif rsi_v > CONFIG["rsi_max"]:  rsi_tag = "sobrecomprado"
+    elif rsi_v == CONFIG["rsi_max"]: rsi_tag = "en el limite"
+    else:                             rsi_tag = "OK"
+
+    # FIX 4: volumen — explicacion clara de las X
+    vol_r   = a["vol_r"]
+    if vol_r >= 1.5:
+        vol_tag = f"ALTO — {vol_r:.1f}x el promedio"
+    elif vol_r >= 0.8:
+        vol_tag = f"normal — {vol_r:.1f}x el promedio"
+    else:
+        vol_tag = f"BAJO — {vol_r:.1f}x el promedio"
+
+    # FIX 3: entrada tardia — si precio >2% sobre SMA8 Y fan<4, ADVERTENCIA fuerte
+    if a.get("senal_tardia") and a["fan"] < 4:
+        tardia_v = "\nAVISO: precio extendido >2% sobre SMA8 — considera esperar pullback"
+    elif a.get("senal_tardia"):
+        tardia_v = "  (extendido >2% SMA8)"
+    else:
+        tardia_v = ""
+
+    p1, p2, p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, vol_r)
+
+    acc  = pos["acc"]
+    s25  = max(1, round(acc * 0.25))
+    s30  = max(1, round(acc * 0.30))
+    s20  = max(1, round(acc * 0.20))
+    s25b = max(0, acc - s25 - s30 - s20)
+
+    ath  = d.get("ath_52w", 0)
+    dist_ath = (f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
+                if ath > d["precio"] else f"ATH 52s: {ath:.2f}  (en zona ATH)")
+
+    etf_ref = get_sector_etf(d.get("sector","N/A"))
+    ctx_ia  = ia.get("contexto", "")
+
     return (
         f"*SISTEMA SIRIO — Solares*\n"
         f"{hora}{pm_tag}\n"
         f"Swing DIARIO  5-10 dias\n\n"
         f"*{d['ticker']}*  {d.get('nombre','')}\n"
-        f"Sector: {d.get('sector','N/A')}\n"
+        f"Sector: {d.get('sector','N/A')}  |  Ref: {etf_ref}\n"
         f"Precio: {d['precio']:.2f} USD  ({d['pct']:+.1f}%){tardia_v}\n"
         f"{dist_ath}\n\n"
         f"*Abanico SMA {ef}*\n"
@@ -454,8 +531,11 @@ def build_msg(d,a,pos,ia,sent_texto):
         f"MACD: {d['macd_e']}\n"
         f"RSI:  {rsi_v:.0f}  ({rsi_tag})\n"
         f"ADX:  {d['adx_e']} ({d['adx']:.0f})\n"
-        f"ATR(14): {atr_v:.2f} USD  ({atr_pct:.1f}% del precio)\n"
-        f"Vol vs prom.20d: {vol_r:.1f}x  ({vol_tag})\n\n"
+        # FIX 3: ATR solo en % del precio
+        f"ATR(14): {atr_pct}% del precio  (rango diario esperado)\n"
+        # FIX 4: volumen con explicacion clara
+        f"Volumen: {vol_tag}\n"
+        f"  (comparado con promedio de los ultimos 20 dias)\n\n"
         f"*Sentiment redes*\n"
         f"{sent_texto}\n\n"
         f"*Tu posicion*\n"
@@ -468,15 +548,19 @@ def build_msg(d,a,pos,ia,sent_texto):
         f"T3 +3R:     {pos['t3']:.2f} USD  (+{((pos['t3']/d['precio'])-1)*100:.1f}%)\n"
         f"Runner:     trail EMA8 libre\n"
         f"R/R: {pos['rr']:.1f}x  |  Riesgo: {pos['perd']:.0f} USD\n\n"
-        f"*Plan salida Sistema Hibrido*\n"
-        f"25%({s25}) T1  30%({s30}) T2  20%({s20}) T3  25%({s25b}) trail\n"
+        # FIX 5: nombre correcto del plan de salida
+        f"*Gestion de Salida — Sistema Sirio*\n"
+        f"25%({s25}acc) T1  |  30%({s30}acc) T2\n"
+        f"20%({s20}acc) T3  |  25%({s25b}acc) trail EMA8\n"
         f"Time-stop: 7 dias sin T1 salida total\n\n"
         f"*Probabilidades*\n"
-        f"T1: {p1}%  T2: {p2}%  T3: {p3}%\n\n"
+        f"T1: {p1}%  |  T2: {p2}%  |  T3: {p3}%\n\n"
+        # FIX 6: IA con contexto macro/sector/tema siempre presente
         f"*IA {ia['prob']}% — {ia['senal']}*\n"
-        f"{ia['razon']}\n"
+        f"Contexto: {ia.get('contexto','N/D')}\n"
+        f"Setup: {ia['razon']}\n"
         f"Vigilar: {ia['alerta']}\n\n"
-        f"Sistema Sirio v5 — Solares"
+        f"Sistema Sirio v5.1 — Solares"
     )
 
 # ── MAIN ──────────────────────────────────────────────────────
@@ -504,6 +588,11 @@ def main():
         print(f"{d['precio']:.2f} RSI:{rsi_s} MACD:{d['macd_e']} [{d.get('sector','?')[:10]}]")
         a=analizar(d)
         if a["fan"]<CONFIG["min_fan_to_alert"] or not a["en_rango"] or not a["vol_ok"]:
+            continue
+        # FIX: señal tardia + fan incompleto = NO alertar (esperar pullback)
+        # Solo alertar si fan==4 aunque sea tardía, o si no es tardía con fan>=3
+        if a.get("senal_tardia") and a["fan"] < 4:
+            print(f"  skip (tardia >2% SMA8 con fan {a['fan']}/4 — esperar pullback)")
             continue
         print(f"  *** FAN {a['fan']}/4 — obteniendo sentiment...")
         sent_score,sent_texto=get_sentiment_resumen(ticker)

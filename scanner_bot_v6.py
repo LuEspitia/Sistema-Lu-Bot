@@ -60,10 +60,13 @@ def cargar_estado():
         with open(CONFIG["state_file"],"r",encoding="utf-8") as f:
             e=json.load(f)
         if e.get("fecha")!=str(date.today()):
-            return {"fecha":str(date.today()),"alertados":[],"count":0}
+            return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"count":0}
+        # Compatibilidad con versiones anteriores
+        if "largo_enviado" not in e:
+            e["largo_enviado"] = list(e.get("alertados",[]))
         return e
     except:
-        return {"fecha":str(date.today()),"alertados":[],"count":0}
+        return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"count":0}
 
 def guardar_estado(e):
     try:
@@ -889,7 +892,63 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"Solares no gestiona fondos de terceros.</i>"
     )
 
-def calcular_prioridad(a, ia, d):
+def build_msg_corto(d, a, pos, ia, tendencia_semanal):
+    """
+    Mensaje de ACTUALIZACIÓN — para tickers que ya recibieron el mensaje largo hoy.
+    Muestra solo los cambios relevantes desde la alerta original.
+    Claro para novatos y expertos: semáforo visual + números clave.
+    """
+    hora     = hora_et()
+    rsi_v    = d["rsi"] if d["rsi"] else 0
+    vol_r    = a["vol_r"]
+    score    = a.get("score", 0)
+    prio_ico, prio_txt = calcular_prioridad(a, ia, d)
+
+    # Distancia al SMA8 — clave para saber si está en zona de entrada
+    sma8v    = d["sma8"] or 0
+    dist_s8  = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
+    if dist_s8 <= 1.0:
+        zona_txt = f"✅ EN ZONA — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f})"
+    elif dist_s8 <= 2.0:
+        zona_txt = f"⚠️ CERCA — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f})"
+    else:
+        zona_txt = f"❌ EXTENDIDA — {dist_s8:.1f}% sobre SMA8 ({sma8v:.2f})"
+
+    # RSI semáforo
+    rsi_ico = "🟢" if 50<=rsi_v<=65 else "🟡" if rsi_v<=72 else "🔴"
+
+    # Vol semáforo
+    vol_ico = "🔥" if vol_r>=1.5 else "✅" if vol_r>=0.8 else "⚠️"
+
+    # IA resumen en 1 línea
+    ia_txt = ""
+    if ia.get("senal") not in ("ERROR","SIN IA","","ESPERAR"):
+        ia_txt = f"\n🤖 IA {ia['prob']}% — {ia['senal']}: {ia.get('alerta','')}"
+    elif ia.get("senal") == "ESPERAR":
+        ia_txt = f"\n🤖 IA {ia['prob']}% — ESPERAR"
+
+    def esc(t): return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+    return (
+        f"🔄 <b>ACTUALIZACIÓN — {d['ticker']}</b>  {prio_ico} {prio_txt}\n"
+        f"🕐 {hora}\n\n"
+
+        f"<b>¿Sigue válida la señal?</b>\n"
+        f"{zona_txt}\n"
+        f"{rsi_ico} RSI: {rsi_v:.0f}  |  {vol_ico} Vol: {vol_r:.1f}x  |  Score: {score}/100\n"
+        f"MACD: {'🟢' if 'Bull' in d['macd_e'] else '🔴'} {d['macd_e']}\n"
+        f"{tendencia_semanal}\n"
+        f"{ia_txt}\n\n"
+
+        f"<b>Niveles vigentes</b>\n"
+        f"💲 Precio actual: <b>{d['precio']:.2f}</b> ({d['pct']:+.1f}%)\n"
+        f"🛑 Stop: {pos['stop']:.2f}  |  🎯 T1: {pos['t1']:.2f}  |  T2: {pos['t2']:.2f}\n\n"
+
+        f"<i>Mensaje completo ya fue enviado hoy — este es el seguimiento.\n"
+        f"Sistema Sirio v6 — Solares</i> 🌟"
+    )
+
+
     """
     🔴 ALTA    — Score 75+, ADX fuerte, vol 1.5x+, IA=ENTRAR, no tardía, RSI<68
     🟡 MEDIA   — Score 60-74, condiciones buenas, algún factor marginal
@@ -1030,8 +1089,13 @@ def main():
     enviar_resumen_4h(estado)
 
     tickers    = obtener_universo()
-    pendientes = [t for t in tickers if t not in ya]
-    print(f"\nA revisar: {len(pendientes)}  (alertados hoy: {len(ya)})\n")
+    largo_enviado = estado.get("largo_enviado", [])
+    # Los tickers con mensaje largo ya enviado se re-escanean para actualizaciones
+    # Los que nunca se alertaron se escanean para señal nueva
+    pendientes = tickers  # escanear todo el universo cada hora
+    print(f"\nUniverso a revisar: {len(pendientes)} | "
+          f"Señales nuevas posibles: {len(pendientes)-len(largo_enviado)} | "
+          f"Actualizaciones posibles: {len(largo_enviado)}\n")
 
     nuevas = 0; razones = {}
 
@@ -1052,6 +1116,17 @@ def main():
         if a["vol_r"] < 0.7:
             print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
             razones["vol_bajo"] = razones.get("vol_bajo", 0) + 1; continue
+        # RSI sobrecomprado extremo — RSI > 80 no es zona de entrada swing
+        rsi_v_check = d.get("rsi", 0) or 0
+        if rsi_v_check > 80:
+            print(f"    skip: RSI {rsi_v_check:.0f} > 80 sobrecomprado extremo")
+            razones["rsi_extremo"] = razones.get("rsi_extremo", 0) + 1; continue
+        # ETFs de renta fija — no aplican para swing (precio casi no se mueve)
+        nombre_check = d.get("nombre","").lower()
+        if d.get("sector","") in ("","N/A") and any(w in nombre_check for w in
+                ["treasury","bond","rate","fixed","floating","ultra short","t-bill"]):
+            print(f"    skip: ETF renta fija ({d.get('nombre','')[:25]})")
+            razones["renta_fija"] = razones.get("renta_fija", 0) + 1; continue
         if a.get("senal_tardia") and a["fan"] < 4:
             print(f"    skip: tardío >2% SMA8")
             razones["tardia"] = razones.get("tardia", 0) + 1; continue
@@ -1067,10 +1142,14 @@ def main():
             print(f"    skip: {tend_sem}")
             razones["semanal"] = razones.get("semanal", 0) + 1; continue
 
-        # ── Señal válida — no hay límite, Lu decide si entra ──
-        print(f"  ⭐ FAN 4/4 | Score {a['score']}/100 | {d.get('vela_patron','?')[:40]}")
+        # ── Señal válida ──────────────────────────────────────
+        largo_enviado = estado.get("largo_enviado", [])
+        es_repetido   = ticker in largo_enviado
+
+        print(f"  ⭐ FAN 4/4 | Score {a['score']}/100 | "
+              f"{'ACTUALIZACIÓN' if es_repetido else 'NUEVA SEÑAL'}")
+
         sc_sent, txt_sent, datos_sent = get_sentiment_completo(ticker)
-        # Extraer titulares de Yahoo para pasarlos a la IA en el prompt
         noticias_yh = []
         if datos_sent.get("yahoo"):
             noticias_yh = datos_sent["yahoo"].get("titulares", [])
@@ -1078,20 +1157,34 @@ def main():
         ia  = analizar_ia(d, a, pos, sc_sent, tend_sem, noticias_yh)
         print(f"     IA: {ia['prob']}% — {ia['senal']}")
 
-        msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
-        ok  = send_telegram(msg)
+        if es_repetido:
+            # Mensaje corto de seguimiento
+            msg = build_msg_corto(d, a, pos, ia, tend_sem)
+        else:
+            # Mensaje largo completo — primera vez del día
+            msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
+
+        ok = send_telegram(msg)
 
         if ok:
-            nuevas += 1; ya.append(ticker)
-            estado["alertados"] = ya
-            estado["count"]     = count + nuevas
+            nuevas += 1
+            # Registrar en alertados (para el "sin coincidencias")
+            if ticker not in ya:
+                ya.append(ticker)
+            # Registrar en largo_enviado solo si era nueva señal
+            if not es_repetido:
+                largo_enviado.append(ticker)
+            estado["alertados"]     = ya
+            estado["largo_enviado"] = largo_enviado
+            estado["count"]         = count + nuevas
             guardar_estado(estado)
             registrar_backtest(ticker, d["precio"], pos["stop"],
                                pos["t1"], pos["t2"], pos["t3"],
                                a["score"], ia["senal"], d.get("vela_patron",""))
             guardar_en_diario(ticker, d["precio"], a["fan"],
                               datos_sent, ia["senal"], d.get("vela_patron",""))
-            print(f"  ✅ Enviado (total hoy: {count+nuevas})")
+            tipo = "actualización" if es_repetido else "nueva señal"
+            print(f"  ✅ Enviado como {tipo} (total hoy: {count+nuevas})")
         else:
             print(f"  ❌ Error Telegram")
 

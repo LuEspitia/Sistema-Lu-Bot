@@ -514,53 +514,50 @@ def build_msg(d, a, pos, ia, sent_texto):
     etf_ref = get_sector_etf(d.get("sector","N/A"))
     ctx_ia  = ia.get("contexto", "")
 
+    macd_emoji = "🟢" if "Bull" in d["macd_e"] else "🔴"
+    vol_emoji  = "🔥" if vol_r >= 1.5 else "⚠️" if vol_r < 0.8 else "✅"
+    ia_emoji   = "🚀" if ia["prob"] >= 70 else "⚡" if ia["prob"] >= 55 else "⏸"
+
     return (
-        f"*SISTEMA SIRIO — Solares*\n"
-        f"{hora}{pm_tag}\n"
-        f"Swing DIARIO  5-10 dias\n\n"
-        f"*{d['ticker']}*  {d.get('nombre','')}\n"
-        f"Sector: {d.get('sector','N/A')}  |  Ref: {etf_ref}\n"
-        f"Precio: {d['precio']:.2f} USD  ({d['pct']:+.1f}%){tardia_v}\n"
-        f"{dist_ath}\n\n"
-        f"*Abanico SMA {ef}*\n"
-        f"{'SI' if a['c1'] else 'NO'} Precio > SMA8    {d['sma8']:.2f}\n"
-        f"{'SI' if a['c2'] else 'NO'} SMA8   > SMA20   {d['sma20']:.2f}\n"
-        f"{'SI' if a['c3'] else 'NO'} SMA20  > SMA50   {d['sma50']:.2f}\n"
-        f"{'SI' if a['c4'] else 'NO'} SMA50  > SMA200  {d['sma200']:.2f}\n\n"
-        f"*Indicadores*\n"
-        f"MACD: {d['macd_e']}\n"
-        f"RSI:  {rsi_v:.0f}  ({rsi_tag})\n"
-        f"ADX:  {d['adx_e']} ({d['adx']:.0f})\n"
-        # FIX 3: ATR solo en % del precio
-        f"ATR(14): {atr_pct}% del precio  (rango diario esperado)\n"
-        # FIX 4: volumen con explicacion clara
-        f"Volumen: {vol_tag}\n"
-        f"  (comparado con promedio de los ultimos 20 dias)\n\n"
-        f"*Sentiment redes*\n"
+        f"🌟 *SISTEMA SIRIO - Solares*\n"
+        f"🕐 {hora}{pm_tag}\n"
+        f"📈 Swing DIARIO 5-10 dias\n\n"
+        f"*{d['ticker']}* {d.get('nombre','')}\n"
+        f"🏭 Sector: {d.get('sector','N/A')} | Ref: *{etf_ref}*\n"
+        f"💲 {d['precio']:.2f} USD ({d['pct']:+.1f}%){tardia_v}\n"
+        f"🏔 {dist_ath}\n\n"
+        f"*📊 Abanico SMA {ef}*\n"
+        f"{'✅' if a['c1'] else '❌'} Precio > SMA8    {d['sma8']:.2f}\n"
+        f"{'✅' if a['c2'] else '❌'} SMA8   > SMA20   {d['sma20']:.2f}\n"
+        f"{'✅' if a['c3'] else '❌'} SMA20  > SMA50   {d['sma50']:.2f}\n"
+        f"{'✅' if a['c4'] else '❌'} SMA50  > SMA200  {d['sma200']:.2f}\n\n"
+        f"*🔬 Indicadores*\n"
+        f"MACD: {macd_emoji} {d['macd_e']}\n"
+        f"RSI: {rsi_v:.0f} ({rsi_tag})\n"
+        f"ADX: {d['adx_e']} ({d['adx']:.0f})\n"
+        f"ATR: {atr_pct}% diario esperado\n"
+        f"Vol: {vol_emoji} {vol_tag}\n"
+        f"_(vs prom. 20 dias)_\n\n"
+        f"*📰 Noticias*\n"
         f"{sent_texto}\n\n"
-        f"*Tu posicion*\n"
-        f"Entrada:    {d['precio']:.2f} USD\n"
-        f"Comprar:    *{pos['acc']} acciones*\n"
-        f"Capital:    {pos['tot']:.0f} USD\n"
-        f"Stop -1R:   {pos['stop']:.2f} USD  (-6%)\n"
-        f"T1 +1R:     {pos['t1']:.2f} USD  (+{((pos['t1']/d['precio'])-1)*100:.1f}%)\n"
-        f"T2 +2R:     {pos['t2']:.2f} USD  (+{((pos['t2']/d['precio'])-1)*100:.1f}%)\n"
-        f"T3 +3R:     {pos['t3']:.2f} USD  (+{((pos['t3']/d['precio'])-1)*100:.1f}%)\n"
-        f"Runner:     trail EMA8 libre\n"
-        f"R/R: {pos['rr']:.1f}x  |  Riesgo: {pos['perd']:.0f} USD\n\n"
-        # FIX 5: nombre correcto del plan de salida
-        f"*Gestion de Salida — Sistema Sirio*\n"
-        f"25%({s25}acc) T1  |  30%({s30}acc) T2\n"
-        f"20%({s20}acc) T3  |  25%({s25b}acc) trail EMA8\n"
-        f"Time-stop: 7 dias sin T1 salida total\n\n"
-        f"*Probabilidades*\n"
-        f"T1: {p1}%  |  T2: {p2}%  |  T3: {p3}%\n\n"
-        # FIX 6: IA con contexto macro/sector/tema siempre presente
-        f"*IA {ia['prob']}% — {ia['senal']}*\n"
-        f"Contexto: {ia.get('contexto','N/D')}\n"
-        f"Setup: {ia['razon']}\n"
-        f"Vigilar: {ia['alerta']}\n\n"
-        f"Sistema Sirio v5.1 — Solares"
+        f"*💰 Posicion*\n"
+        f"Entrada: {d['precio']:.2f} USD | *{pos['acc']} acc* | Capital: {pos['tot']:.0f} USD\n"
+        f"🛑 Stop: {pos['stop']:.2f} (-6%)\n"
+        f"🎯 T1: {pos['t1']:.2f} (+{((pos['t1']/d['precio'])-1)*100:.1f}%)\n"
+        f"🎯 T2: {pos['t2']:.2f} (+{((pos['t2']/d['precio'])-1)*100:.1f}%)\n"
+        f"🎯 T3: {pos['t3']:.2f} (+{((pos['t3']/d['precio'])-1)*100:.1f}%)\n"
+        f"🚀 Runner: trail EMA8\n"
+        f"R/R: {pos['rr']:.1f}x | Riesgo: {pos['perd']:.0f} USD\n\n"
+        f"*🗓 Gestion de Salida - Sistema Sirio*\n"
+        f"25%({s25}) T1 | 30%({s30}) T2 | 20%({s20}) T3 | 25%({s25b}) trail\n"
+        f"⏱ Time-stop: 7 dias sin T1 salida total\n\n"
+        f"*📊 Probabilidades*\n"
+        f"T1: {p1}% | T2: {p2}% | T3: {p3}%\n\n"
+        f"*{ia_emoji} IA {ia['prob']}% - {ia['senal']}*\n"
+        f"🌍 {ia.get('contexto','N/D')}\n"
+        f"📐 {ia['razon']}\n"
+        f"👁 Vigilar: {ia['alerta']}\n\n"
+        f"_Sistema Sirio v5.1 - Solares_ 🌟"
     )
 
 # ── MAIN ──────────────────────────────────────────────────────
@@ -611,15 +608,25 @@ def main():
 
     print(f"=== Fin: {nuevas} alertas nuevas ===")
 
-    hora_utc=datetime.now(timezone.utc).hour
-    if nuevas==0 and hora_utc==13 and count==0:
-        send_telegram(
-            f"*SISTEMA SIRIO — Solares*\n{hora_et()}\n\n"
-            f"Universo revisado: {len(pendientes)} tickers.\n"
-            f"Sin setups validos esta manana.\n\n"
-            f"Estas protegida. Esperar es la posicion.\n\n"
-            f"Sistema Sirio v5 — Solares"
-        )
+    # Notificar sin coincidencias en CADA corrida donde no se enviaron señales
+    # (no solo a las 9am — así Lu sabe que el bot corrió aunque no haya setups)
+    if nuevas == 0:
+        hora_et_str = hora_et()
+        revisados   = len(pendientes)
+        ya_hoy      = count
+        if ya_hoy >= CONFIG["max_alertas_dia"]:
+            # Ya se enviaron las 5 alertas del dia — no hacer spam
+            pass
+        else:
+            send_telegram(
+                f"🔭 *SISTEMA SIRIO — Solares*\n"
+                f"{hora_et_str}\n\n"
+                f"⚙️ Universo escaneado: {revisados} tickers\n"
+                f"📭 Sin coincidencias esta pasada\n"
+                f"✅ Alertas enviadas hoy: {ya_hoy}/{CONFIG['max_alertas_dia']}\n\n"
+                f"_Esperar es la posicion. Estas protegida._\n\n"
+                f"Sistema Sirio v5.1 — Solares"
+            )
 
 if __name__=="__main__":
     main()

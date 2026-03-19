@@ -616,10 +616,20 @@ def analizar(d):
     vol_r=d["vol_r"]; vol_ok=d["vh"]>=CONFIG["min_volume_abs"]
     tardia=bool(s8 and p>s8*1.02)
     rsi_v=d["rsi"] if d["rsi"] else 0; adx_v=d["adx"] if d["adx"] else 0
-    pts_fan=fan*10
-    pts_rsi=(15 if 55<=rsi_v<=65 else 10 if 50<=rsi_v<=70 else 5 if 45<=rsi_v<=72 else 0)
+    pts_fan = fan*10
+    # RSI óptimo 50-65. Penalización clara por sobrecomprado (>70)
+    if 55<=rsi_v<=65:     pts_rsi = 15
+    elif 50<=rsi_v<70:    pts_rsi = 8
+    elif 45<=rsi_v<50:    pts_rsi = 4
+    elif rsi_v>=70:       pts_rsi = 0   # sobrecomprado — sin puntos
+    else:                 pts_rsi = 0   # débil
     pts_adx=(15 if adx_v>=30 else 12 if adx_v>=25 else 8 if adx_v>=20 else 0)
-    pts_vol=(15 if vol_r>=2.0 else 12 if vol_r>=1.5 else 8 if vol_r>=1.0 else 4 if vol_r>=0.7 else 0)
+    # Volumen: 0.6x = 0 puntos. Necesita al menos 0.8x para sumar.
+    if vol_r>=2.0:        pts_vol = 15
+    elif vol_r>=1.5:      pts_vol = 12
+    elif vol_r>=1.0:      pts_vol = 8
+    elif vol_r>=0.8:      pts_vol = 4
+    else:                 pts_vol = 0   # vol bajo — sin puntos
     pts_vela=int(d.get("vela_fuerza",0)*0.15)
     score=min(100,pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela)
     return {"fan":fan,"c1":c1,"c2":c2,"c3":c3,"c4":c4,
@@ -695,17 +705,26 @@ def analizar_ia(d,a,pos,sentiment_score,tendencia_semanal):
             f"CONTEXTO: [1 frase: VIX + {etf_ref} + catalizador actual]\n"
             f"RAZON: [1 frase sobre setup técnico y vela]\nALERTA: [nivel o evento clave]"
         )
-        # Pausa antes de llamar a la API — evita rate limit 429
-        # cuando el bot procesa varios tickers seguidos
-        time.sleep(4)
-        msg=client.messages.create(
-            model="claude-sonnet-4-20250514",max_tokens=350,
-            tools=[{"type":"web_search_20250305","name":"web_search"}],
-            system=("Eres el analizador del Sistema Sirio de Solares Trading. "
-                    "SIEMPRE usa web_search para noticias actuales. "
-                    "Responde en español con tildes. Formato exacto sin texto extra."),
-            messages=[{"role":"user","content":prompt}]
-        )
+        # Pausa anti rate-limit — Anthropic limita llamadas consecutivas
+        # 8 segundos entre señales es suficiente para 5+ señales seguidas
+        time.sleep(8)
+        for intento in range(2):  # máximo 2 intentos
+            try:
+                msg=client.messages.create(
+                    model="claude-sonnet-4-20250514",max_tokens=350,
+                    tools=[{"type":"web_search_20250305","name":"web_search"}],
+                    system=("Eres el analizador del Sistema Sirio de Solares Trading. "
+                            "SIEMPRE usa web_search para noticias actuales. "
+                            "Responde en español con tildes. Formato exacto sin texto extra."),
+                    messages=[{"role":"user","content":prompt}]
+                )
+                break  # éxito — salir del retry
+            except Exception as ex:
+                if "rate_limit" in str(ex).lower() and intento == 0:
+                    print(f"    IA rate limit — esperando 15s...")
+                    time.sleep(15)
+                else:
+                    raise  # re-lanzar si no es rate limit o ya reintentamos
         txt=""
         for block in msg.content:
             if hasattr(block,"text"): txt+=block.text+"\n"
@@ -998,6 +1017,10 @@ def main():
         # ── Filtros técnicos ──
         if a["fan"] < CONFIG["min_fan_to_alert"] or not a["en_rango"] or not a["vol_ok"]:
             razones["fan"] = razones.get("fan", 0) + 1; continue
+        # Volumen ratio mínimo 0.7x — evita señales sin participación real
+        if a["vol_r"] < 0.7:
+            print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
+            razones["vol_bajo"] = razones.get("vol_bajo", 0) + 1; continue
         if a.get("senal_tardia") and a["fan"] < 4:
             print(f"    skip: tardío >2% SMA8")
             razones["tardia"] = razones.get("tardia", 0) + 1; continue

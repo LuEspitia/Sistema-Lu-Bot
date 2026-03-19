@@ -29,8 +29,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # FIX 6: Guardar y restaurar el estado del dia entre corridas
-      # La key incluye la fecha → se resetea automaticamente cada dia
       - name: Obtener fecha actual
         id: fecha
         run: echo "hoy=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
@@ -39,9 +37,26 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/sirio_alertas_hoy.json
-          key: sirio-estado-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
+          key: sirio-v6-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
           restore-keys: |
-            sirio-estado-${{ steps.fecha.outputs.hoy }}-
+            sirio-v6-${{ steps.fecha.outputs.hoy }}-
+
+      - name: Verificar estado restaurado
+        run: |
+          if [ -f /tmp/sirio_alertas_hoy.json ]; then
+            COUNT=$(python3 -c "import json; d=json.load(open('/tmp/sirio_alertas_hoy.json')); print(d.get('count',0))" 2>/dev/null || echo "0")
+            FECHA=$(python3 -c "import json; d=json.load(open('/tmp/sirio_alertas_hoy.json')); print(d.get('fecha',''))" 2>/dev/null || echo "")
+            HOY=$(date +'%Y-%m-%d')
+            echo "Estado: fecha=$FECHA count=$COUNT hoy=$HOY"
+            if [ "$FECHA" != "$HOY" ]; then
+              echo "Estado de otro dia — eliminando"
+              rm /tmp/sirio_alertas_hoy.json
+            else
+              echo "Estado valido: $COUNT alertas enviadas hoy"
+            fi
+          else
+            echo "Sin estado previo — dia limpio"
+          fi
 
       - name: Instalar librerias
         run: |
@@ -54,3 +69,14 @@ jobs:
           TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scanner_bot_v6.py
+
+      - name: Subir backtest y diario
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sirio-datos-${{ steps.fecha.outputs.hoy }}-run${{ github.run_number }}
+          path: |
+            /tmp/sirio_backtest.json
+            /tmp/sirio_diario_sentiment.json
+          if-no-files-found: ignore
+          retention-days: 90

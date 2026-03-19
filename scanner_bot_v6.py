@@ -37,7 +37,14 @@ CONFIG = {
     "score_minimo":        55,
     "earnings_dias_min":   5,
     "max_tickers_scan":    200,
-    "max_alertas_dia":     5,
+    # Sin límite de señales — el bot informa, Lu decide
+    # El score compuesto (fan+RSI+ADX+vol+vela) ya filtra lo irrelevante
+    "max_alertas_dia":     99,
+    # Resumen de vela 4H — 15 min antes del cierre de cada vela
+    # Vela 1: 9:30am-1:30pm ET → resumen 1:15pm ET
+    # Vela 2: 1:30pm-4:00pm ET → resumen 3:45pm ET
+    "resumen_4h_horas":    [13, 15],   # hora UTC-4 para enviar resumen
+    "resumen_4h_mins":     [15, 45],   # minuto para cada resumen
     "state_file":          "/tmp/sirio_alertas_hoy.json",
     "backtest_file":       "/tmp/sirio_backtest.json",
     "diario_file":         "/tmp/sirio_diario_sentiment.json",
@@ -610,41 +617,56 @@ def send_telegram(msg):
     except Exception as ex:
         print(f"  [TG] Excepción: {ex}"); return False
 
-def build_msg(d,a,pos,ia,sent_texto,tendencia_semanal):
-    hora=hora_et(); pm_tag=" [PRE-MARKET]" if d.get("es_pm") else ""
-    rsi_v=d["rsi"] if d["rsi"] else 0; atr_v=d["atr"] if d["atr"] else 0
-    atr_pct=round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
-    rsi_tag=("débil" if rsi_v<CONFIG["rsi_min"] else "sobrecomprado" if rsi_v>CONFIG["rsi_max"] else "OK")
-    vol_r=a["vol_r"]
-    vol_tag=(f"🔥 ALTO — {vol_r:.1f}x" if vol_r>=1.5
-             else f"✅ normal — {vol_r:.1f}x" if vol_r>=0.8 else f"⚠️ BAJO — {vol_r:.1f}x")
-    tardia_v="\n⚠️ precio extendido &gt;2% sobre SMA8" if a.get("senal_tardia") else ""
-    p1,p2,p3=calc_probabilidades(a["fan"],d["adx"],rsi_v,vol_r)
-    acc=pos["acc"]
-    s25=max(1,round(acc*0.25)); s30=max(1,round(acc*0.30))
-    s20x=max(1,round(acc*0.20)); s25b=max(0,acc-s25-s30-s20x)
-    ath=d.get("ath_52w",0)
-    dist_ath=(f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
-              if ath>d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
-    etf_ref=get_sector_etf(d.get("sector","N/A"))
-    macd_ico="🟢" if "Bull" in d["macd_e"] else "🔴"
-    ia_ico="🚀" if ia["prob"]>=70 else "⚡" if ia["prob"]>=55 else "⏸"
-    score=a.get("score",0); barra="█"*int(score/10)+"░"*(10-int(score/10))
+def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
+    hora   = hora_et(); pm_tag=" [PRE-MARKET]" if d.get("es_pm") else ""
+    rsi_v  = d["rsi"] if d["rsi"] else 0
+    atr_v  = d["atr"] if d["atr"] else 0
+    atr_pct= round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
+    rsi_tag= ("débil" if rsi_v<CONFIG["rsi_min"]
+              else "sobrecomprado" if rsi_v>CONFIG["rsi_max"] else "OK")
+    vol_r  = a["vol_r"]
+    vol_tag= (f"🔥 ALTO — {vol_r:.1f}x" if vol_r>=1.5
+              else f"✅ normal — {vol_r:.1f}x" if vol_r>=0.8
+              else f"⚠️ BAJO — {vol_r:.1f}x")
+    tardia_v = "\n⚠️ precio extendido &gt;2% sobre SMA8" if a.get("senal_tardia") else ""
+    p1,p2,p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, vol_r)
+    acc = pos["acc"]
+    s25 = max(1,round(acc*0.25)); s30=max(1,round(acc*0.30))
+    s20x= max(1,round(acc*0.20)); s25b=max(0,acc-s25-s30-s20x)
+    ath  = d.get("ath_52w",0)
+    dist_ath = (f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
+                if ath>d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
+    etf_ref  = get_sector_etf(d.get("sector","N/A"))
+    macd_ico = "🟢" if "Bull" in d["macd_e"] else "🔴"
+    ia_ico   = "🚀" if ia["prob"]>=70 else "⚡" if ia["prob"]>=55 else "⏸"
+    score    = a.get("score",0)
+    barra    = "█"*int(score/10)+"░"*(10-int(score/10))
+
+    # Prioridad de la señal
+    prio_ico, prio_txt = calcular_prioridad(a, ia, d)
+
     def esc(t): return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-    ctx=esc(ia.get("contexto","N/D")); razon=esc(ia.get("razon","")); alerta=esc(ia.get("alerta",""))
+    ctx   = esc(ia.get("contexto","N/D"))
+    razon = esc(ia.get("razon",""))
+    alerta= esc(ia.get("alerta",""))
+
     return (
-        f"🌟 <b>SISTEMA SIRIO — Solares</b>\n"
+        f"{prio_ico} <b>SISTEMA SIRIO — {prio_txt}</b>\n"
+        f"🌟 <b>Solares Trading</b>\n"
         f"🕐 {hora}{pm_tag}\n"
         f"📈 Swing DIARIO 5-10 días\n\n"
+
         f"<b>{d['ticker']}</b>  {d.get('nombre','')}\n"
         f"🏭 Sector: {d.get('sector','N/A')}  |  Ref: <b>{etf_ref}</b>\n"
         f"💲 {d['precio']:.2f} USD  ({d['pct']:+.1f}%){tardia_v}\n"
         f"🏔 {dist_ath}\n\n"
+
         f"<b>📊 Abanico SMA OK 4/4</b>\n"
         f"{'✅' if a['c1'] else '❌'} Precio &gt; SMA8    {d['sma8']:.2f}\n"
         f"{'✅' if a['c2'] else '❌'} SMA8   &gt; SMA20   {d['sma20']:.2f}\n"
         f"{'✅' if a['c3'] else '❌'} SMA20  &gt; SMA50   {d['sma50']:.2f}\n"
         f"{'✅' if a['c4'] else '❌'} SMA50  &gt; SMA200  {d['sma200']:.2f}\n\n"
+
         f"<b>🔬 Indicadores</b>\n"
         f"MACD: {macd_ico} {d['macd_e']}\n"
         f"RSI:  {rsi_v:.0f}  ({rsi_tag})\n"
@@ -652,13 +674,18 @@ def build_msg(d,a,pos,ia,sent_texto,tendencia_semanal):
         f"ATR:  {atr_pct}% diario esperado\n"
         f"Vol:  {vol_tag}\n"
         f"<i>(vs promedio últimos 20 días)</i>\n\n"
+
         f"<b>{d.get('vela_patron','Sin patrón')}</b>\n"
         f"<i>Fuerza de la vela: {d.get('vela_fuerza',0)}%</i>\n\n"
+
         f"<b>📈 Tendencia semanal</b>\n{tendencia_semanal}\n\n"
+
         f"<b>📰 Sentiment multi-canal</b>\n{sent_texto}\n\n"
+
         f"<b>🎯 Score Sistema Sirio: {score}/100</b>\n"
         f"<code>{barra}</code>\n"
         f"<i>{a.get('score_det','')}</i>\n\n"
+
         f"<b>💰 Posición</b>\n"
         f"Entrada: {d['precio']:.2f} USD  |  <b>{pos['acc']} acc</b>  |  Capital: {pos['tot']:.0f} USD\n"
         f"🛑 Stop:    {pos['stop']:.2f}  (-6% / -1R)\n"
@@ -667,13 +694,19 @@ def build_msg(d,a,pos,ia,sent_texto,tendencia_semanal):
         f"🎯 T3:      {pos['t3']:.2f}  (+{((pos['t3']/d['precio'])-1)*100:.1f}%)\n"
         f"🚀 Runner:  trail EMA8\n"
         f"R/R: {pos['rr']:.1f}x  |  Riesgo: {pos['perd']:.0f} USD\n\n"
+
         f"<b>🗓 Gestión de Salida — Sistema Sirio</b>\n"
         f"25%({s25}) T1  |  30%({s30}) T2  |  20%({s20x}) T3  |  25%({s25b}) trail\n"
         f"⏱ Time-stop: 7 días sin T1 → salida total\n\n"
+
         f"<b>📊 Probabilidades</b>\n"
         f"T1: {p1}%  |  T2: {p2}%  |  T3: {p3}%\n\n"
+
         f"<b>{ia_ico} IA {ia['prob']}% — {ia['senal']}</b>\n"
-        f"🌍 {ctx}\n📐 {razon}\n👁 Vigilar: {alerta}\n\n"
+        f"🌍 {ctx}\n"
+        f"📐 {razon}\n"
+        f"👁 Vigilar: {alerta}\n\n"
+
         f"<i>Sistema Sirio v6 — Solares</i> 🌟\n"
         f"─────────────────────────────────\n"
         f"⚠️ <i>AVISO LEGAL: Esta información tiene carácter "
@@ -684,73 +717,223 @@ def build_msg(d,a,pos,ia,sent_texto,tendencia_semanal):
         f"Solares no gestiona fondos de terceros.</i>"
     )
 
+def calcular_prioridad(a, ia, d):
+    """
+    🔴 ALTA    — Score 75+, ADX fuerte, vol 1.5x+, IA=ENTRAR, no tardía, RSI<68
+    🟡 MEDIA   — Score 60-74, condiciones buenas, algún factor marginal
+    🟢 INFO    — Score 55-59, señal válida pero esperar confirmación
+    """
+    score  = a.get("score", 0)
+    adx    = d.get("adx", 0) or 0
+    vol_r  = a.get("vol_r", 0)
+    tardia = a.get("senal_tardia", False)
+    ia_ok  = "ENTRAR" in ia.get("senal", "").upper()
+    rsi_v  = d.get("rsi", 50) or 50
+    if (score>=75 and adx>=25 and vol_r>=1.5 and not tardia and ia_ok and rsi_v<=68):
+        return "🔴", "ALTA PRIORIDAD"
+    elif score>=60 and adx>=20 and vol_r>=1.0:
+        return "🟡", "MEDIA PRIORIDAD"
+    else:
+        return "🟢", "INFORMATIVA — esperar confirmación"
+
+def verificar_señal_activa(ticker):
+    """
+    Re-verifica si una señal del día sigue válida para el resumen 4H.
+    Activa = fan 4/4 + precio ≤ 3% sobre SMA8 + MACD alcista.
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period="60d", interval="1d")
+        if hist.empty or len(hist)<30: return None
+        c       = hist["Close"]
+        precio  = float(c.iloc[-1])
+        sma8v   = sma(c, 8);  sma20v = sma(c, 20)
+        sma50v  = sma(c, 50); sma200v= sma(c, 200)
+        if not all([sma8v, sma20v, sma50v, sma200v]): return None
+        fan     = sum([precio>sma8v, sma8v>sma20v, sma20v>sma50v, sma50v>sma200v])
+        pct_s8  = (precio-sma8v)/sma8v*100
+        rsi_v   = calc_rsi(c)
+        _,_,_,macd_e = calc_macd(c)
+        return {
+            "precio": round(precio,2), "sma8": round(sma8v,2),
+            "fan": fan, "pct_s8": round(pct_s8,1),
+            "macd": macd_e, "rsi": round(rsi_v,0) if rsi_v else 0,
+            "activa": fan==4 and pct_s8<=3.0 and "Bull" in macd_e
+        }
+    except:
+        return None
+
+def enviar_resumen_4h(estado):
+    """
+    Resumen 30 min antes del cierre de cada vela 4H:
+    · 1:00pm ET — 30 min antes del cierre de vela 9:30am-1:30pm
+    · 3:30pm ET — 30 min antes del cierre de mercado (vela 1:30pm-4:00pm)
+    Re-verifica cada señal del día: ¿sigue activa? ¿precio cerca de SMA8?
+    """
+    ahora    = datetime.now(ET)
+    hora_act = ahora.hour
+    min_act  = ahora.minute
+    enviados = estado.get("resumen_4h", [])
+
+    # 30 min antes del cierre de cada vela 4H
+    # Vela 1: 9:30am–1:30pm  → resumen a 1:00pm ET (13:00)
+    # Vela 2: 1:30pm–4:00pm  → resumen a 3:30pm ET (15:30)
+    momentos = [
+        (13,  0, "🕐 Vela 4H APERTURA (9:30am–1:30pm ET)"),
+        (15, 30, "🕓 Vela 4H CIERRE   (1:30pm–4:00pm ET)"),
+    ]
+
+    for (h_res, m_res, vela_nom) in momentos:
+        clave = f"{h_res}:{m_res:02d}"
+        if clave in enviados: continue
+        mins_desde = (hora_act*60 + min_act) - (h_res*60 + m_res)
+        if not (0 <= mins_desde <= 12): continue
+
+        # Re-verificar todas las señales del día
+        alertados = estado.get("alertados", [])
+        activas   = []
+        cerradas  = []
+
+        print(f"  [4H] Preparando resumen {clave}...")
+        for t in alertados:
+            v = verificar_señal_activa(t)
+            if v:
+                if v["activa"]:
+                    activas.append((t, v))
+                else:
+                    cerradas.append((t, v))
+
+        # Construir mensaje
+        if activas:
+            lines_act = []
+            for t, v in activas:
+                dist = f"+{v['pct_s8']:.1f}% sobre SMA8" if v['pct_s8']>0 else "EN SMA8"
+                lines_act.append(
+                    f"  ✅ <b>{t}</b> — ${v['precio']} | RSI {v['rsi']} | {dist}\n"
+                    f"     Fan 4/4 | MACD {v['macd']}"
+                )
+            txt_act = "<b>🟢 SEÑALES ACTIVAS — oportunidad vigente:</b>\n" + "\n".join(lines_act)
+        else:
+            txt_act = "⚪ Sin señales activas en este momento."
+
+        if cerradas:
+            lines_cer = []
+            for t, v in cerradas:
+                motivo = "extendida" if v['pct_s8']>3 else f"fan {v['fan']}/4" if v['fan']<4 else "MACD giró"
+                lines_cer.append(f"  ⚠️ <b>{t}</b> — ${v['precio']} ({motivo})")
+            txt_cer = "\n<b>🔴 Señales que se cerraron:</b>\n" + "\n".join(lines_cer)
+        else:
+            txt_cer = ""
+
+        if not alertados:
+            txt_act = "Sin señales enviadas hasta ahora en esta sesión."
+
+        send_telegram(
+            f"📊 <b>SISTEMA SIRIO — Resumen {vela_nom}</b>\n"
+            f"🕐 {hora_et()}\n"
+            f"⏱ 30 min para el cierre de vela — decide antes\n\n"
+            f"{txt_act}"
+            f"{txt_cer}\n\n"
+            f"<b>💡 Para swing:</b> si el precio está tocando SMA8 con vela "
+            f"de confirmación, este es el momento de entrar antes de la "
+            f"formación de la próxima vela 4H.\n\n"
+            f"<i>Sistema Sirio v6 — Solares</i> 🌟"
+        )
+        enviados.append(clave)
+        estado["resumen_4h"] = enviados
+        guardar_estado(estado)
+        print(f"  [4H] Resumen {clave} enviado ({len(activas)} activas, {len(cerradas)} cerradas)")
+
+
+
 def main():
     print(f"\n{'='*55}")
     print(f"  SISTEMA SIRIO — Solares v6   {hora_et()}")
     print(f"{'='*55}\n")
-    estado=cargar_estado(); ya=estado.get("alertados",[]); count=estado.get("count",0)
-    if count>=CONFIG["max_alertas_dia"]:
-        print(f"Máximo {CONFIG['max_alertas_dia']} alertas hoy."); return
-    tickers=obtener_universo(); pendientes=[t for t in tickers if t not in ya]
+
+    estado  = cargar_estado()
+    ya      = estado.get("alertados", [])
+    count   = estado.get("count", 0)
+
+    # Verificar si toca enviar resumen de 4H (independiente de señales)
+    enviar_resumen_4h(estado)
+
+    tickers    = obtener_universo()
+    pendientes = [t for t in tickers if t not in ya]
     print(f"\nA revisar: {len(pendientes)}  (alertados hoy: {len(ya)})\n")
-    nuevas=0; razones={}
+
+    nuevas = 0; razones = {}
 
     for ticker in pendientes:
-        if count+nuevas>=CONFIG["max_alertas_dia"]: break
-        print(f"  {ticker}...",end=" ",flush=True)
-        d=obtener_datos(ticker)
+        print(f"  {ticker}...", end=" ", flush=True)
+        d = obtener_datos(ticker)
         if d.get("error"):
-            print(f"skip ({d['error'][:35]})"); razones["error"]=razones.get("error",0)+1; continue
-        rsi_s=f"{d['rsi']:.0f}" if d["rsi"] else "N/A"
+            print(f"skip ({d['error'][:35]})")
+            razones["error"] = razones.get("error", 0) + 1; continue
+        rsi_s = f"{d['rsi']:.0f}" if d["rsi"] else "N/A"
         print(f"{d['precio']:.2f} RSI:{rsi_s} MACD:{d['macd_e']} [{d.get('sector','?')[:10]}]")
-        a=analizar(d)
-        if a["fan"]<CONFIG["min_fan_to_alert"] or not a["en_rango"] or not a["vol_ok"]:
-            razones["fan"]=razones.get("fan",0)+1; continue
-        if a.get("senal_tardia") and a["fan"]<4:
-            print(f"    skip: tardío >2% SMA8"); razones["tardia"]=razones.get("tardia",0)+1; continue
-        if a["score"]<CONFIG["score_minimo"]:
-            print(f"    skip: score {a['score']}/100"); razones["score"]=razones.get("score",0)+1; continue
-        hay_earn,dias_earn=check_earnings_proximos(ticker)
+        a = analizar(d)
+
+        # ── Filtros técnicos ──
+        if a["fan"] < CONFIG["min_fan_to_alert"] or not a["en_rango"] or not a["vol_ok"]:
+            razones["fan"] = razones.get("fan", 0) + 1; continue
+        if a.get("senal_tardia") and a["fan"] < 4:
+            print(f"    skip: tardío >2% SMA8")
+            razones["tardia"] = razones.get("tardia", 0) + 1; continue
+        if a["score"] < CONFIG["score_minimo"]:
+            print(f"    skip: score {a['score']}/100")
+            razones["score"] = razones.get("score", 0) + 1; continue
+        hay_earn, dias_earn = check_earnings_proximos(ticker)
         if hay_earn:
-            print(f"    skip: earnings en {dias_earn}d"); razones["earnings"]=razones.get("earnings",0)+1; continue
-        semanal_ok,tend_sem=check_tendencia_semanal(ticker)
+            print(f"    skip: earnings en {dias_earn}d")
+            razones["earnings"] = razones.get("earnings", 0) + 1; continue
+        semanal_ok, tend_sem = check_tendencia_semanal(ticker)
         if not semanal_ok:
-            print(f"    skip: {tend_sem}"); razones["semanal"]=razones.get("semanal",0)+1; continue
+            print(f"    skip: {tend_sem}")
+            razones["semanal"] = razones.get("semanal", 0) + 1; continue
+
+        # ── Señal válida — no hay límite, Lu decide si entra ──
         print(f"  ⭐ FAN 4/4 | Score {a['score']}/100 | {d.get('vela_patron','?')[:40]}")
-        sc_sent,txt_sent,datos_sent=get_sentiment_completo(ticker)
-        pos=posicion(d["precio"],d.get("ath_52w"))
-        ia=analizar_ia(d,a,pos,sc_sent,tend_sem)
+        sc_sent, txt_sent, datos_sent = get_sentiment_completo(ticker)
+        pos = posicion(d["precio"], d.get("ath_52w"))
+        ia  = analizar_ia(d, a, pos, sc_sent, tend_sem)
         print(f"     IA: {ia['prob']}% — {ia['senal']}")
-        msg=build_msg(d,a,pos,ia,txt_sent,tend_sem)
-        ok=send_telegram(msg)
+
+        msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
+        ok  = send_telegram(msg)
+
         if ok:
-            nuevas+=1; ya.append(ticker)
-            estado["alertados"]=ya; estado["count"]=count+nuevas; guardar_estado(estado)
-            registrar_backtest(ticker,d["precio"],pos["stop"],pos["t1"],pos["t2"],pos["t3"],
-                               a["score"],ia["senal"],d.get("vela_patron",""))
-            guardar_en_diario(ticker,d["precio"],a["fan"],datos_sent,ia["senal"],d.get("vela_patron",""))
-            print(f"  ✅ Enviado ({count+nuevas}/{CONFIG['max_alertas_dia']} hoy)")
+            nuevas += 1; ya.append(ticker)
+            estado["alertados"] = ya
+            estado["count"]     = count + nuevas
+            guardar_estado(estado)
+            registrar_backtest(ticker, d["precio"], pos["stop"],
+                               pos["t1"], pos["t2"], pos["t3"],
+                               a["score"], ia["senal"], d.get("vela_patron",""))
+            guardar_en_diario(ticker, d["precio"], a["fan"],
+                              datos_sent, ia["senal"], d.get("vela_patron",""))
+            print(f"  ✅ Enviado (total hoy: {count+nuevas})")
         else:
             print(f"  ❌ Error Telegram")
 
-    print(f"\nFin: {nuevas} alertas | Total hoy: {count+nuevas} | Skips: {razones}")
+    print(f"\nFin: {nuevas} señales nuevas | Total hoy: {count+nuevas} | Skips: {razones}")
 
-    # SIEMPRE enviar mensaje cuando no hay señales nuevas
-    if nuevas==0 and count<CONFIG["max_alertas_dia"]:
-        mapa={"fan":"Fan SMA incompleto","score":"Score bajo mínimo",
-              "earnings":"Earnings próximos","semanal":"Semanal bajista",
-              "tardia":"Señal tardía","error":"Error de datos"}
-        skips_txt="\n".join(f"  · {mapa.get(k,k)}: {v}" for k,v in razones.items()) if razones else ""
+    # Notificar cuando no hay señales nuevas en esta pasada
+    if nuevas == 0:
+        mapa = {"fan":"Fan SMA incompleto","score":"Score bajo mínimo",
+                "earnings":"Earnings próximos","semanal":"Semanal bajista",
+                "tardia":"Señal tardía","error":"Error de datos"}
+        skips_txt = "\n".join(f"  · {mapa.get(k,k)}: {v}"
+                              for k,v in razones.items()) if razones else ""
         send_telegram(
             f"🔭 <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()}\n\n"
             f"⚙️ Universo escaneado: <b>{len(pendientes)} tickers</b>\n"
             f"📭 <b>Sin coincidencias</b> en esta pasada\n"
-            f"✅ Alertas hoy: {count}/{CONFIG['max_alertas_dia']}\n"
-            +(f"\n<b>Motivos de filtrado:</b>\n{skips_txt}\n" if skips_txt else "")
-            +f"\n<i>Esperar es la posición. Estás protegida.</i>\n\n"
+            f"✅ Señales hoy: {count + nuevas}\n"
+            + (f"\n<b>Motivos de filtrado:</b>\n{skips_txt}\n" if skips_txt else "")
+            + f"\n<i>Esperar es la posición. Estás protegida.</i>\n\n"
             f"<i>Sistema Sirio v6 — Solares</i> 🌟"
         )
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()

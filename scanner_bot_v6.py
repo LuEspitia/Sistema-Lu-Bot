@@ -395,6 +395,8 @@ def _tv_screener(max_tickers=300):
             s = item.get("s", "")
             if ":" in s:
                 t = s.split(":")[1]
+                # Limpiar: quitar $ al inicio, solo letras mayúsculas, max 5 chars
+                t = t.lstrip("$").upper()
                 if t and len(t) <= 5 and t.isalpha():
                     tickers.append(t)
         if tickers:

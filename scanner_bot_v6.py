@@ -34,7 +34,7 @@ CONFIG = {
     "rsi_max":             72,
     "min_volume_abs":      500_000,
     "min_fan_to_alert":    4,
-    "score_minimo":        55,
+    "score_minimo":        65,    # 65/100 acordado originalmente
     "earnings_dias_min":   5,
     "max_tickers_scan":    500,  # ahora tenemos universo grande
     # Sin límite de señales — el bot informa, Lu decide
@@ -239,49 +239,52 @@ def _yahoo_news(ticker):
 
 def get_sentiment_completo(ticker):
     """
-    Reddit y StockTwits a veces bloquean IPs de datacenter (GitHub Actions).
-    Cuando eso pasa, usamos solo Yahoo Finance que siempre funciona.
-    El score se ajusta para reflejar la fuente disponible.
+    Obtiene sentiment de las fuentes disponibles.
+    Si no hay datos de redes: muestra solo noticias de Yahoo.
+    Si tampoco hay Yahoo: sección de sentiment NO aparece en el mensaje.
     """
-    print(f"    Sentiment {ticker}...",end=" ",flush=True)
-    rd=_reddit(ticker); st=_stocktwits(ticker); yh=_yahoo_news(ticker)
+    print(f"    Sentiment {ticker}...", end=" ", flush=True)
+    rd = _reddit(ticker)
+    st = _stocktwits(ticker)
+    yh = _yahoo_news(ticker)
+
     scores=[]; pesos=[]; secciones=[]
+
     if rd:
         scores.append(rd["score"]); pesos.append(35)
-        tops="\n".join(f"  · {t}" for t in rd["top"]) if rd["top"] else ""
+        tops = "\n".join(f"  · {t}" for t in rd["top"]) if rd["top"] else ""
         secciones.append(f"📱 <b>Reddit</b>: {rd['label']} ({rd['score']}%) — {rd['detalle']}\n{tops}")
+
     if st:
         scores.append(st["score"]); pesos.append(40)
         secciones.append(f"💬 <b>StockTwits</b>: {st['label']} ({st['score']}%) — {st['detalle']}")
+
     if yh:
         scores.append(yh["score"]); pesos.append(25 if (rd or st) else 100)
-        nots="\n".join(f"  · {t[:80]}" for t in yh["titulares"])
+        nots = "\n".join(f"  · {t[:80]}" for t in yh["titulares"])
         secciones.append(f"📰 <b>Yahoo Finance</b>: {yh['label']} ({yh['score']}%)\n{nots}")
 
-    fuentes=sum(1 for x in [rd,st,yh] if x)
+    fuentes = sum(1 for x in [rd, st, yh] if x)
 
     if not scores:
-        # Sin ninguna fuente — neutral por defecto, no bloquea la señal
-        print("sin datos (neutral)")
-        texto="⚪ <b>Sentiment: Neutral</b> — sin datos de redes disponibles\n<i>(Reddit/StockTwits bloqueados desde servidor — normal en GitHub Actions)</i>"
-        datos={"score_final":50,"label":"⚪ Neutral","reddit":None,"stocktwits":None,"yahoo":None,"fuentes":0}
-        return 50, texto, datos
+        # Sin ninguna fuente — retorna None para que el mensaje omita la sección
+        print("sin datos")
+        datos = {"score_final": None, "label": None,
+                 "reddit": None, "stocktwits": None, "yahoo": None, "fuentes": 0}
+        return None, None, datos  # texto=None → sección omitida en build_msg
 
-    peso_total=sum(pesos)
-    sc_final=int(sum(s*p for s,p in zip(scores,pesos))/peso_total)
-    etiq=("🟢 BULLISH" if sc_final>=65 else "🟡 Lev.Bull" if sc_final>=55
-          else "⚪ Neutral" if sc_final>=45 else "🟠 Lev.Bear" if sc_final>=35 else "🔴 BEARISH")
-
-    aviso=""
-    if fuentes==1 and not rd and not st:
-        aviso="\n<i>(Solo Yahoo Finance disponible — Reddit/StockTwits bloqueados desde servidor)</i>"
+    peso_total  = sum(pesos)
+    sc_final    = int(sum(s*p for s,p in zip(scores,pesos)) / peso_total)
+    etiq = ("🟢 BULLISH" if sc_final>=65 else "🟡 Lev.Bull" if sc_final>=55
+            else "⚪ Neutral" if sc_final>=45 else "🟠 Lev.Bear" if sc_final>=35 else "🔴 BEARISH")
 
     print(f"{sc_final}% {etiq} ({fuentes} fuentes)")
-    texto=(f"<b>Score Solares: {sc_final}% bullish — {etiq}</b>\n"
-           f"<i>({fuentes} fuentes activas)</i>{aviso}\n\n"
-           +"\n\n".join(secciones))
-    datos={"score_final":sc_final,"label":etiq,"reddit":rd,"stocktwits":st,"yahoo":yh,"fuentes":fuentes}
-    return sc_final,texto,datos
+    texto = (f"<b>Score Solares: {sc_final}% bullish — {etiq}</b>\n"
+             f"<i>({fuentes} fuentes activas)</i>\n\n" + "\n\n".join(secciones))
+
+    datos = {"score_final": sc_final, "label": etiq,
+             "reddit": rd, "stocktwits": st, "yahoo": yh, "fuentes": fuentes}
+    return sc_final, texto, datos
 
 def guardar_en_diario(ticker,precio,fan,sent_datos,ia_senal,vela):
     try:
@@ -679,68 +682,88 @@ def get_vix():
     except: pass
     return None,"N/D"
 
-def analizar_ia(d,a,pos,sentiment_score,tendencia_semanal):
+def analizar_ia(d, a, pos, sentiment_score, tendencia_semanal, noticias_yahoo=None):
+    """
+    Análisis IA con web_search desactivado — Claude analiza con los datos
+    que ya tiene (técnicos + noticias Yahoo que le pasamos en el prompt).
+    Esto elimina el rate limit 429 que ocurría con el tool de web_search.
+    """
     if not CLAUDE_API_KEY:
         return {"prob":0,"senal":"SIN IA","contexto":"","razon":"Sin API key","alerta":""}
     try:
-        client=anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        rsi_v=d["rsi"] if d["rsi"] else 0
-        atr_v=d["atr"] if d["atr"] else 0
-        atr_pct=round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
-        sector=d.get("sector","N/A"); etf_ref=get_sector_etf(sector)
-        vix_v,vix_nivel=get_vix()
-        vix_str=f"{vix_v} ({vix_nivel})" if vix_v else "N/D"
-        prompt=(
-            f"Analiza {d['ticker']} ({d.get('nombre','')}) — swing 5-10 días.\n\n"
-            f"TÉCNICOS: Precio {d['precio']:.2f} ({d['pct']:+.2f}%) | Fan {a['fan']}/4\n"
+        client  = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+        rsi_v   = d["rsi"] if d["rsi"] else 0
+        atr_v   = d["atr"] if d["atr"] else 0
+        atr_pct = round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
+        sector  = d.get("sector","N/A")
+        etf_ref = get_sector_etf(sector)
+        vix_v, vix_nivel = get_vix()
+        vix_str = f"{vix_v} ({vix_nivel})" if vix_v else "N/D"
+        sent_str = f"{sentiment_score}%" if sentiment_score else "sin datos"
+
+        # Incluir noticias de Yahoo directamente en el prompt
+        noticias_txt = ""
+        if noticias_yahoo:
+            noticias_txt = "\nNOTICIAS RECIENTES (Yahoo Finance):\n"
+            noticias_txt += "\n".join(f"- {n}" for n in noticias_yahoo[:3])
+
+        prompt = (
+            f"Analiza {d['ticker']} ({d.get('nombre','')}) para swing trading 5-10 días.\n\n"
+            f"TÉCNICOS DIARIOS:\n"
+            f"Precio: {d['precio']:.2f} USD ({d['pct']:+.2f}%) | Fan SMA: {a['fan']}/4\n"
             f"MACD: {d['macd_e']} | RSI: {rsi_v:.0f} | ADX: {d['adx_e']} ({d['adx']:.0f})\n"
-            f"ATR: {atr_pct}% | Vol: {a['vol_r']:.1f}x | Score: {a['score']}/100\n"
-            f"Vela: {d.get('vela_patron','N/D')} (fuerza {d.get('vela_fuerza',0)}%)\n"
+            f"ATR: {atr_pct}% | Volumen: {a['vol_r']:.1f}x prom.20d\n"
+            f"Score Sistema Sirio: {a['score']}/100\n"
+            f"Vela: {d.get('vela_patron','sin patrón')} (fuerza {d.get('vela_fuerza',0)}%)\n"
+            f"Señal tardía (>2% SMA8): {'SÍ' if a.get('senal_tardia') else 'NO'}\n\n"
+            f"CONTEXTO MACRO:\n"
+            f"VIX: {vix_str} | ETF sector referencia: {etf_ref}\n"
             f"Tendencia semanal: {tendencia_semanal}\n"
-            f"VIX: {vix_str} | ETF sector: {etf_ref} | Sentiment: {sentiment_score}%\n"
-            f"Stop: {pos['stop']:.2f} | T1: {pos['t1']:.2f} | R/R: {pos['rr']:.1f}x\n\n"
-            f"Usa web_search para noticias de HOY sobre {d['ticker']} y {sector}.\n"
-            f"Responde en español con tildes. Formato EXACTO:\n"
-            f"PROBABILIDAD: [0-100]\nSIGNAL: [ENTRAR / ESPERAR / NO APLICA]\n"
-            f"CONTEXTO: [1 frase: VIX + {etf_ref} + catalizador actual]\n"
-            f"RAZON: [1 frase sobre setup técnico y vela]\nALERTA: [nivel o evento clave]"
+            f"Sentiment: {sent_str}\n"
+            f"Stop: {pos['stop']:.2f} | T1: {pos['t1']:.2f} | R/R: {pos['rr']:.1f}x"
+            f"{noticias_txt}\n\n"
+            f"Responde ÚNICAMENTE en este formato exacto (en español con tildes):\n"
+            f"PROBABILIDAD: [número 0-100]\n"
+            f"SIGNAL: [ENTRAR / ESPERAR / NO APLICA]\n"
+            f"CONTEXTO: [1 frase sobre VIX + {etf_ref} + catalizador del sector ahora]\n"
+            f"RAZON: [1 frase sobre el setup técnico específico y la vela]\n"
+            f"ALERTA: [precio exacto o evento específico a vigilar]"
         )
-        # Pausa anti rate-limit — Anthropic limita llamadas consecutivas
-        # 8 segundos entre señales es suficiente para 5+ señales seguidas
-        time.sleep(8)
-        for intento in range(2):  # máximo 2 intentos
-            try:
-                msg=client.messages.create(
-                    model="claude-sonnet-4-20250514",max_tokens=350,
-                    tools=[{"type":"web_search_20250305","name":"web_search"}],
-                    system=("Eres el analizador del Sistema Sirio de Solares Trading. "
-                            "SIEMPRE usa web_search para noticias actuales. "
-                            "Responde en español con tildes. Formato exacto sin texto extra."),
-                    messages=[{"role":"user","content":prompt}]
-                )
-                break  # éxito — salir del retry
-            except Exception as ex:
-                if "rate_limit" in str(ex).lower() and intento == 0:
-                    print(f"    IA rate limit — esperando 15s...")
-                    time.sleep(15)
-                else:
-                    raise  # re-lanzar si no es rate limit o ya reintentamos
-        txt=""
-        for block in msg.content:
-            if hasattr(block,"text"): txt+=block.text+"\n"
-        pr,se,ctx,ra,al=0,"ESPERAR","","",""
+
+        # Sleep para no saturar la API entre señales consecutivas
+        time.sleep(6)
+
+        msg = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            # Sin tools de web_search — evita rate limit y doble llamada interna
+            system=(
+                "Eres el analizador técnico del Sistema Sirio de Solares Trading. "
+                "Conoces correlaciones entre sectores, VIX y macro. "
+                "Responde SOLO en el formato exacto solicitado. "
+                "En español con tildes y acentos correctos. Sin texto adicional."
+            ),
+            messages=[{"role":"user","content":prompt}]
+        )
+
+        txt = msg.content[0].text if msg.content else ""
+        pr,se,ctx,ra,al = 0,"ESPERAR","","",""
         for ln in txt.splitlines():
-            ln=ln.strip()
+            ln = ln.strip()
             if ln.startswith("PROBABILIDAD:"):
                 try: pr=int(ln.split(":")[1].strip().replace("%",""))
                 except: pass
-            elif ln.upper().startswith("SIGNAL:"): se=ln.split(":",1)[1].strip()
+            elif ln.upper().startswith("SIGNAL:"):   se=ln.split(":",1)[1].strip()
             elif ln.upper().startswith("CONTEXTO:"): ctx=ln.split(":",1)[1].strip()
-            elif ln.upper().startswith("RAZON:"): ra=ln.split(":",1)[1].strip()
-            elif ln.startswith("ALERTA:"): al=ln.split(":",1)[1].strip()
+            elif ln.upper().startswith("RAZON:"):    ra=ln.split(":",1)[1].strip()
+            elif ln.upper().startswith("ALERTA:"):   al=ln.split(":",1)[1].strip()
+
         return {"prob":pr,"senal":se,"contexto":ctx,"razon":ra,"alerta":al}
+
     except Exception as ex:
-        return {"prob":0,"senal":"ERROR","contexto":"","razon":str(ex)[:80],"alerta":""}
+        err = str(ex)[:60]
+        print(f"    IA error: {err}")
+        return {"prob":0,"senal":"ERROR","contexto":"","razon":err,"alerta":""}
 
 def send_telegram(msg):
     try:
@@ -821,9 +844,9 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
 
         f"<b>📈 Tendencia semanal</b>\n{tendencia_semanal}\n\n"
 
-        f"<b>📰 Sentiment multi-canal</b>\n{sent_texto}\n\n"
+        + (f"<b>📰 Noticias y Sentiment</b>\n{sent_texto}\n\n" if sent_texto else "")
 
-        f"<b>🎯 Score Sistema Sirio: {score}/100</b>\n"
+        + f"<b>🎯 Score Sistema Sirio: {score}/100</b>\n"
         f"<code>{barra}</code>\n"
         f"<i>{a.get('score_det','')}</i>\n\n"
 
@@ -843,12 +866,18 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"<b>📊 Probabilidades</b>\n"
         f"T1: {p1}%  |  T2: {p2}%  |  T3: {p3}%\n\n"
 
-        f"<b>{ia_ico} IA {ia['prob']}% — {ia['senal']}</b>\n"
-        f"🌍 {ctx}\n"
-        f"📐 {razon}\n"
-        f"👁 Vigilar: {alerta}\n\n"
+        # Sección IA — solo si no hubo error
+        + (
+            f"<b>{ia_ico} IA {ia['prob']}% — {ia['senal']}</b>\n"
+            + (f"🌍 {ctx}\n" if ctx else "")
+            + (f"📐 {razon}\n" if razon else "")
+            + (f"👁 Vigilar: {alerta}\n" if alerta else "")
+            + "\n"
+            if ia.get("senal") not in ("ERROR", "SIN IA", "")
+            else f"<b>🤖 IA</b> — <i>análisis no disponible en esta señal</i>\n\n"
+        )
 
-        f"<i>Sistema Sirio v6 — Solares</i> 🌟\n"
+        + f"<i>Sistema Sirio v6 — Solares</i> 🌟\n"
         f"─────────────────────────────────\n"
         f"⚠️ <i>AVISO LEGAL: Esta información tiene carácter "
         f"exclusivamente educativo e informativo. No constituye "
@@ -1039,8 +1068,12 @@ def main():
         # ── Señal válida — no hay límite, Lu decide si entra ──
         print(f"  ⭐ FAN 4/4 | Score {a['score']}/100 | {d.get('vela_patron','?')[:40]}")
         sc_sent, txt_sent, datos_sent = get_sentiment_completo(ticker)
+        # Extraer titulares de Yahoo para pasarlos a la IA en el prompt
+        noticias_yh = []
+        if datos_sent.get("yahoo"):
+            noticias_yh = datos_sent["yahoo"].get("titulares", [])
         pos = posicion(d["precio"], d.get("ath_52w"))
-        ia  = analizar_ia(d, a, pos, sc_sent, tend_sem)
+        ia  = analizar_ia(d, a, pos, sc_sent, tend_sem, noticias_yh)
         print(f"     IA: {ia['prob']}% — {ia['senal']}")
 
         msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)

@@ -7,7 +7,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-import os, json
+import os, json, time
 from datetime import datetime, date, timezone, timedelta
 
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -81,53 +81,136 @@ def registrar_backtest(ticker,precio,stop,t1,t2,t3,score,ia_senal,vela):
     except Exception as ex:
         print(f"  [BT] Error: {ex}")
 
-HDRS_R={"User-Agent":"SistemaSirio/1.0 (Solares Trading Research)"}
-BULL_KW=["beat","surge","jump","rise","higher","buy","upgrade","growth","strong",
-         "record","profit","rally","gain","outperform","bullish","upside","breakout"]
-BEAR_KW=["miss","fall","drop","decline","lower","sell","downgrade","loss","weak",
-         "cut","risk","concern","warn","below","bearish","downside","correction"]
+
+# ─────────────────────────────────────────────────────────────
+#  CREDENCIALES DE REDES SOCIALES (desde GitHub Secrets)
+#  Reddit:     REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET,
+#              REDDIT_USERNAME, REDDIT_PASSWORD
+#  StockTwits: STOCKTWITS_TOKEN
+#  Si no están configurados, el bot sigue funcionando con Yahoo
+# ─────────────────────────────────────────────────────────────
+REDDIT_CLIENT_ID     = os.environ.get("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.environ.get("REDDIT_CLIENT_SECRET", "")
+REDDIT_USERNAME      = os.environ.get("REDDIT_USERNAME", "")
+REDDIT_PASSWORD      = os.environ.get("REDDIT_PASSWORD", "")
+STOCKTWITS_TOKEN     = os.environ.get("STOCKTWITS_TOKEN", "")
+
+def _get_reddit_token():
+    """
+    OAuth2 de Reddit via script app.
+    Con token propio, las IPs de GitHub Actions ya no son bloqueadas.
+    """
+    if not all([REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD]):
+        return None
+    try:
+        r = requests.post(
+            "https://www.reddit.com/api/v1/access_token",
+            auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
+            data={"grant_type": "password",
+                  "username": REDDIT_USERNAME,
+                  "password": REDDIT_PASSWORD},
+            headers={"User-Agent": "SistemaSirio/1.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            return r.json().get("access_token")
+    except:
+        pass
+    return None
+
+# Cache del token Reddit para no pedir uno nuevo por cada ticker
+_REDDIT_TOKEN_CACHE = {"token": None, "ts": 0}
 
 def _reddit(ticker):
-    resultados=[]
+    """
+    Busca menciones del ticker en Reddit.
+    - Si hay credenciales: usa OAuth (autenticado, no bloqueado)
+    - Si no hay credenciales: intenta acceso anónimo como antes
+    """
+    global _REDDIT_TOKEN_CACHE
+
+    # Obtener/reusar token (válido 60 min, recachear cada 50 min)
+    ahora = time.time()
+    if not _REDDIT_TOKEN_CACHE["token"] or (ahora - _REDDIT_TOKEN_CACHE["ts"]) > 3000:
+        token = _get_reddit_token()
+        _REDDIT_TOKEN_CACHE = {"token": token, "ts": ahora}
+
+    token = _REDDIT_TOKEN_CACHE["token"]
+
+    if token:
+        # Modo autenticado — usa oauth.reddit.com, no bloqueado
+        hdrs = {
+            "Authorization": f"bearer {token}",
+            "User-Agent":    "SistemaSirio/1.0"
+        }
+        base_url = "https://oauth.reddit.com"
+    else:
+        # Modo anónimo — puede ser bloqueado desde GitHub Actions
+        hdrs = {"User-Agent": "SistemaSirio/1.0 (Solares Trading Research)"}
+        base_url = "https://www.reddit.com"
+
+    resultados = []
     for sub in ["wallstreetbets","stocks","investing","options"]:
         try:
-            url=(f"https://www.reddit.com/r/{sub}/search.json"
-                 f"?q=%24{ticker}&sort=new&limit=20&t=day&restrict_sr=1")
-            r=requests.get(url,headers=HDRS_R,timeout=10)
-            if r.status_code!=200: continue
+            url = (f"{base_url}/r/{sub}/search.json"
+                   f"?q=%24{ticker}&sort=new&limit=20&t=day&restrict_sr=1")
+            r = requests.get(url, headers=hdrs, timeout=10)
+            if r.status_code != 200: continue
             for p in r.json().get("data",{}).get("children",[]):
-                d2=p["data"]
-                resultados.append({"titulo":d2.get("title","")[:100],
-                                   "upvote":d2.get("upvote_ratio",0.5),
-                                   "score":d2.get("score",0)})
-        except: continue
+                d2 = p["data"]
+                resultados.append({
+                    "titulo": d2.get("title","")[:100],
+                    "upvote": d2.get("upvote_ratio", 0.5),
+                    "score":  d2.get("score", 0)
+                })
+        except:
+            continue
+
     if not resultados: return None
-    n=len(resultados)
-    avg_up=sum(r["upvote"] for r in resultados)/n
-    sc=int(avg_up*100)
-    lbl=("Bullish" if sc>=65 else "Lev.Bull" if sc>=55
-         else "Neutral" if sc>=45 else "Lev.Bear" if sc>=35 else "Bearish")
-    top=[r["titulo"] for r in sorted(resultados,key=lambda x:x["score"],reverse=True)[:3]]
-    return {"n":n,"score":sc,"label":lbl,"top":top,"detalle":f"{n} posts, upvote {avg_up:.0%}"}
+    n = len(resultados)
+    avg_up = sum(r["upvote"] for r in resultados) / n
+    sc = int(avg_up * 100)
+    lbl = ("Bullish" if sc>=65 else "Lev.Bull" if sc>=55
+           else "Neutral" if sc>=45 else "Lev.Bear" if sc>=35 else "Bearish")
+    top = [r["titulo"] for r in sorted(resultados, key=lambda x:x["score"], reverse=True)[:3]]
+    modo = "🔐 auth" if token else "🔓 anon"
+    return {"n":n,"score":sc,"label":lbl,"top":top,
+            "detalle":f"{n} posts Reddit ({modo}), upvote {avg_up:.0%}"}
 
 def _stocktwits(ticker):
+    """
+    Sentiment de StockTwits.
+    - Si hay STOCKTWITS_TOKEN: usa autenticación → más datos, no bloqueado
+    - Si no: intenta acceso público
+    """
     try:
-        r=requests.get(f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json",
-                       timeout=10,headers={"User-Agent":"Mozilla/5.0"})
-        if r.status_code!=200: return None
-        msgs=r.json().get("messages",[])
-        if not msgs: return None
-        bulls=sum(1 for m in msgs if m.get("entities",{}).get("sentiment",{}).get("basic")=="Bullish")
-        bears=sum(1 for m in msgs if m.get("entities",{}).get("sentiment",{}).get("basic")=="Bearish")
-        tot=bulls+bears
-        if tot==0: sc=50; lbl="Neutral"
+        if STOCKTWITS_TOKEN:
+            url = (f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+                   f"?access_token={STOCKTWITS_TOKEN}")
+            hdrs = {"User-Agent": "SistemaSirio/1.0"}
         else:
-            sc=int(bulls/tot*100)
-            lbl=("Bullish" if sc>=65 else "Lev.Bull" if sc>=55
-                 else "Neutral" if sc>=45 else "Lev.Bear" if sc>=35 else "Bearish")
+            url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+            hdrs = {"User-Agent": "Mozilla/5.0"}
+
+        r = requests.get(url, timeout=10, headers=hdrs)
+        if r.status_code != 200: return None
+        msgs = r.json().get("messages", [])
+        if not msgs: return None
+
+        bulls = sum(1 for m in msgs if m.get("entities",{}).get("sentiment",{}).get("basic")=="Bullish")
+        bears = sum(1 for m in msgs if m.get("entities",{}).get("sentiment",{}).get("basic")=="Bearish")
+        tot = bulls + bears
+        if tot == 0: sc=50; lbl="Neutral"
+        else:
+            sc = int(bulls/tot*100)
+            lbl = ("Bullish" if sc>=65 else "Lev.Bull" if sc>=55
+                   else "Neutral" if sc>=45 else "Lev.Bear" if sc>=35 else "Bearish")
+        modo = "🔐 auth" if STOCKTWITS_TOKEN else "🔓 anon"
         return {"n":len(msgs),"bulls":bulls,"bears":bears,"score":sc,"label":lbl,
-                "detalle":f"{len(msgs)} msgs — {bulls}🐂 {bears}🐻"}
-    except: return None
+                "detalle":f"{len(msgs)} msgs StockTwits ({modo}) — {bulls}🐂 {bears}🐻"}
+    except:
+        return None
+
 
 def _yahoo_news(ticker):
     try:
@@ -148,6 +231,11 @@ def _yahoo_news(ticker):
     except: return None
 
 def get_sentiment_completo(ticker):
+    """
+    Reddit y StockTwits a veces bloquean IPs de datacenter (GitHub Actions).
+    Cuando eso pasa, usamos solo Yahoo Finance que siempre funciona.
+    El score se ajusta para reflejar la fuente disponible.
+    """
     print(f"    Sentiment {ticker}...",end=" ",flush=True)
     rd=_reddit(ticker); st=_stocktwits(ticker); yh=_yahoo_news(ticker)
     scores=[]; pesos=[]; secciones=[]
@@ -159,20 +247,32 @@ def get_sentiment_completo(ticker):
         scores.append(st["score"]); pesos.append(40)
         secciones.append(f"💬 <b>StockTwits</b>: {st['label']} ({st['score']}%) — {st['detalle']}")
     if yh:
-        scores.append(yh["score"]); pesos.append(25)
+        scores.append(yh["score"]); pesos.append(25 if (rd or st) else 100)
         nots="\n".join(f"  · {t[:80]}" for t in yh["titulares"])
         secciones.append(f"📰 <b>Yahoo Finance</b>: {yh['label']} ({yh['score']}%)\n{nots}")
+
+    fuentes=sum(1 for x in [rd,st,yh] if x)
+
     if not scores:
-        print("sin datos")
-        return None,"Sin datos de sentiment disponibles",{}
+        # Sin ninguna fuente — neutral por defecto, no bloquea la señal
+        print("sin datos (neutral)")
+        texto="⚪ <b>Sentiment: Neutral</b> — sin datos de redes disponibles\n<i>(Reddit/StockTwits bloqueados desde servidor — normal en GitHub Actions)</i>"
+        datos={"score_final":50,"label":"⚪ Neutral","reddit":None,"stocktwits":None,"yahoo":None,"fuentes":0}
+        return 50, texto, datos
+
     peso_total=sum(pesos)
     sc_final=int(sum(s*p for s,p in zip(scores,pesos))/peso_total)
     etiq=("🟢 BULLISH" if sc_final>=65 else "🟡 Lev.Bull" if sc_final>=55
           else "⚪ Neutral" if sc_final>=45 else "🟠 Lev.Bear" if sc_final>=35 else "🔴 BEARISH")
-    fuentes=sum(1 for x in [rd,st,yh] if x)
+
+    aviso=""
+    if fuentes==1 and not rd and not st:
+        aviso="\n<i>(Solo Yahoo Finance disponible — Reddit/StockTwits bloqueados desde servidor)</i>"
+
     print(f"{sc_final}% {etiq} ({fuentes} fuentes)")
     texto=(f"<b>Score Solares: {sc_final}% bullish — {etiq}</b>\n"
-           f"<i>({fuentes} fuentes activas)</i>\n\n"+"\n\n".join(secciones))
+           f"<i>({fuentes} fuentes activas)</i>{aviso}\n\n"
+           +"\n\n".join(secciones))
     datos={"score_final":sc_final,"label":etiq,"reddit":rd,"stocktwits":st,"yahoo":yh,"fuentes":fuentes}
     return sc_final,texto,datos
 
@@ -466,6 +566,9 @@ def analizar_ia(d,a,pos,sentiment_score,tendencia_semanal):
             f"CONTEXTO: [1 frase: VIX + {etf_ref} + catalizador actual]\n"
             f"RAZON: [1 frase sobre setup técnico y vela]\nALERTA: [nivel o evento clave]"
         )
+        # Pausa antes de llamar a la API — evita rate limit 429
+        # cuando el bot procesa varios tickers seguidos
+        time.sleep(4)
         msg=client.messages.create(
             model="claude-sonnet-4-20250514",max_tokens=350,
             tools=[{"type":"web_search_20250305","name":"web_search"}],

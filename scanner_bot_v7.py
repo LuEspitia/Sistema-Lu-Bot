@@ -1232,35 +1232,8 @@ def main():
         enviar_resumen_4h(estado)
         return
 
-    # ── HEARTBEAT — primer mensaje del día ──────────────────
-    # Una sola vez por día. Informa zona horaria activa (EDT/EST auto).
-    if not estado.get("heartbeat_enviado", False):
-        vix_hb, vix_nivel_hb = get_vix()
-        vix_str_hb = f"{vix_hb} ({vix_nivel_hb})" if vix_hb else "N/D"
-        label_m = "🌅 Pre-Market" if hora_act < 9 else ("🔔 Apertura" if hora_act < 10 else "📡 En curso")
-        try:
-            off_h = ahora_et.utcoffset().total_seconds() / 3600
-            zona_txt = "EDT (UTC-4)" if off_h == -4 else "EST (UTC-5)"
-        except Exception:
-            zona_txt = "ET"
-        hb_ok = send_telegram(
-            f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
-            f"🕐 {hora_et()} · {zona_txt}\n\n"
-            f"✅ Sirio activo · primer escaneo del día\n"
-            f"⚙️ ~490 tickers · score ≥65 · ATH ≥25% · fan 4/4\n"
-            f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
-            f"<i>Señal nueva → aviso inmediato.</i>\n"
-            f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"
-            f"<i>Sistema Sirio v7 — Solares</i> 🌟"
-        )
-        if hb_ok:
-            estado["heartbeat_enviado"] = True
-            estado["ts_ultimo_mensaje"] = time.time()
-            estado["mensajes_hoy"]      = estado.get("mensajes_hoy", 0) + 1
-            guardar_estado(estado)
-            print("  [HB] Heartbeat enviado OK ✅")
-        else:
-            print("⚠️⚠️⚠️  TELEGRAM NO RESPONDE — verificar TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en Secrets  ⚠️⚠️⚠️")
+    # ── HEARTBEAT — se envía DESPUÉS del scan, solo si no hubo señales ──
+    # (bloque movido al final de main(), antes de STATUS PERIÓDICO)
 
     # Verificar si toca enviar resumen de 4H (independiente de señales)
     enviar_resumen_4h(estado)
@@ -1328,7 +1301,7 @@ def main():
         ath_v = d.get("ath_52w", 0)
         if ath_v and ath_v > 0 and d["precio"] > 0:
             dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
-            if 0 < dist_ath_pct <= 25.0:
+            if 0 <= dist_ath_pct <= 25.0:
                 print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% bajo máximo "
                       f"({ath_v:.2f}) — swing necesita ≥25% de espacio")
                 razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
@@ -1416,6 +1389,38 @@ def main():
             print(f"  ❌ Error Telegram")
 
     print(f"\nFin: {nuevas} señales nuevas | Total hoy: {count+nuevas} | Skips: {razones}")
+
+    # ── HEARTBEAT — primer mensaje del día ──────────────────────────────────
+    # Solo se envía si este run NO encontró señales nuevas.
+    # Si hay señal → la señal ya es suficiente, el heartbeat sería ruido.
+    # Si no hay señal → se envía para confirmar que Sirio está vivo y escaneando.
+    if not estado.get("heartbeat_enviado", False) and nuevas == 0:
+        vix_hb, vix_nivel_hb = get_vix()
+        vix_str_hb = f"{vix_hb} ({vix_nivel_hb})" if vix_hb else "N/D"
+        label_m = "🌅 Pre-Market" if hora_act < 9 else ("🔔 Apertura" if hora_act < 10 else "📡 En curso")
+        try:
+            off_h = ahora_et.utcoffset().total_seconds() / 3600
+            zona_txt = "EDT (UTC-4)" if off_h == -4 else "EST (UTC-5)"
+        except Exception:
+            zona_txt = "ET"
+        hb_ok = send_telegram(
+            f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
+            f"🕐 {hora_et()} · {zona_txt}\n\n"
+            f"✅ Sirio activo · primer escaneo del día\n"
+            f"⚙️ ~490 tickers · score ≥65 · ATH ≥25% · fan 4/4\n"
+            f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
+            f"<i>Señal nueva → aviso inmediato.</i>\n"
+            f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"
+            f"<i>Sistema Sirio v7 — Solares</i> 🌟"
+        )
+        if hb_ok:
+            estado["heartbeat_enviado"] = True
+            estado["ts_ultimo_mensaje"] = time.time()
+            estado["mensajes_hoy"]      = estado.get("mensajes_hoy", 0) + 1
+            guardar_estado(estado)
+            print("  [HB] Heartbeat enviado OK ✅")
+        else:
+            print("⚠️⚠️⚠️  TELEGRAM NO RESPONDE — verificar TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en Secrets  ⚠️⚠️⚠️")
 
     # ── STATUS PERIÓDICO — lógica de notificación ───────────────────────────
     # Reglas:

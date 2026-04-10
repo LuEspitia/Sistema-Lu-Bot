@@ -1008,7 +1008,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
             else f"<b>🤖 IA</b> — <i>análisis no disponible en esta señal</i>\n\n"
         )
 
-        + f"<i>Sistema Sirio v6 — Solares</i> 🌟\n"
+        + f"<i>Sistema Sirio v7 — Solares</i> 🌟\n"
         f"─────────────────────────────────\n"
         f"⚠️ <i>AVISO LEGAL: Esta información tiene carácter "
         f"exclusivamente educativo e informativo. No constituye "
@@ -1073,7 +1073,7 @@ def build_msg_corto(d, a, pos, ia, tendencia_semanal, dist_s8=None):
         f"🛑 Stop: {pos['stop']:.2f}  |  🎯 T1: {pos['t1']:.2f}  |  T2: {pos['t2']:.2f}\n\n"
 
         f"<i>Mensaje completo ya fue enviado hoy — este es el seguimiento.\n"
-        f"Sistema Sirio v6 — Solares</i> 🌟"
+        f"Sistema Sirio v7 — Solares</i> 🌟"
     )
 
 
@@ -1123,84 +1123,70 @@ def verificar_señal_activa(ticker):
 
 def enviar_resumen_4h(estado):
     """
-    Resumen 30 min antes del cierre de cada vela 4H:
-    · 1:00pm ET — 30 min antes del cierre de vela 9:30am-1:30pm
-    · 3:30pm ET — 30 min antes del cierre de mercado (vela 1:30pm-4:00pm)
-    Re-verifica cada señal del día: ¿sigue activa? ¿precio cerca de SMA8?
+    Lógica limpia de notificaciones:
+    · Solo envía si hay señales activas que siguen vigentes después de 4h.
+    · Si no hay nada: silencio total (sin resultados no se reporta aquí,
+      el status periódico ya lo maneja con "Sin resultados.").
+    Momentos de re-verificación:
+    · 1:00pm ET — señales de la mañana ¿siguen activas?
+    · 3:30pm ET — señales del mediodía ¿siguen activas?
     """
     ahora    = datetime.now(ET)
     hora_act = ahora.hour
     min_act  = ahora.minute
     enviados = estado.get("resumen_4h", [])
 
-    # 30 min antes del cierre de cada vela 4H
-    # Vela 1: 9:30am–1:30pm  → resumen a 1:00pm ET (13:00)
-    # Vela 2: 1:30pm–4:00pm  → resumen a 3:30pm ET (15:30)
     momentos = [
-        (13,  0, "🕐 Vela 4H APERTURA (9:30am–1:30pm ET)"),
-        (15, 30, "🕓 Vela 4H CIERRE   (1:30pm–4:00pm ET)"),
+        (13,  0),
+        (15, 30),
     ]
 
-    for (h_res, m_res, vela_nom) in momentos:
+    for (h_res, m_res) in momentos:
         clave = f"{h_res}:{m_res:02d}"
         if clave in enviados: continue
         mins_desde = (hora_act*60 + min_act) - (h_res*60 + m_res)
         if not (0 <= mins_desde <= 12): continue
 
-        # Re-verificar todas las señales del día
         alertados = estado.get("alertados", [])
-        activas   = []
-        cerradas  = []
+        if not alertados:
+            # Nada que re-verificar — silencio
+            enviados.append(clave)
+            estado["resumen_4h"] = enviados
+            guardar_estado(estado)
+            print(f"  [4H] {clave} — sin alertados, silencio.")
+            continue
 
-        print(f"  [4H] Preparando resumen {clave}...")
+        activas = []
+        print(f"  [4H] Re-verificando {len(alertados)} señal(es) a las {clave}...")
         for t in alertados:
             v = verificar_señal_activa(t)
-            if v:
-                if v["activa"]:
-                    activas.append((t, v))
-                else:
-                    cerradas.append((t, v))
+            if v and v["activa"]:
+                activas.append((t, v))
 
-        # Construir mensaje
-        if activas:
-            lines_act = []
-            for t, v in activas:
-                dist = f"+{v['pct_s8']:.1f}% sobre SMA8" if v['pct_s8']>0 else "EN SMA8"
-                lines_act.append(
-                    f"  ✅ <b>{t}</b> — ${v['precio']} | RSI {v['rsi']} | {dist}\n"
-                    f"     Fan 4/4 | MACD {v['macd']}"
-                )
-            txt_act = "<b>🟢 SEÑALES ACTIVAS — oportunidad vigente:</b>\n" + "\n".join(lines_act)
-        else:
-            txt_act = "⚪ Sin señales activas en este momento."
+        if not activas:
+            # Señales del día ya no vigentes — silencio
+            enviados.append(clave)
+            estado["resumen_4h"] = enviados
+            guardar_estado(estado)
+            print(f"  [4H] {clave} — señales cerradas, silencio.")
+            continue
 
-        if cerradas:
-            lines_cer = []
-            for t, v in cerradas:
-                motivo = "extendida" if v['pct_s8']>3 else f"fan {v['fan']}/4" if v['fan']<4 else "MACD giró"
-                lines_cer.append(f"  ⚠️ <b>{t}</b> — ${v['precio']} ({motivo})")
-            txt_cer = "\n<b>🔴 Señales que se cerraron:</b>\n" + "\n".join(lines_cer)
-        else:
-            txt_cer = ""
-
-        if not alertados:
-            txt_act = "Sin señales enviadas hasta ahora en esta sesión."
+        # Solo llega aquí si hay señales que SIGUEN activas
+        lines = []
+        for t, v in activas:
+            dist = f"+{v['pct_s8']:.1f}% SMA8" if v['pct_s8'] > 0 else "en SMA8"
+            lines.append(f"  ✅ <b>{t}</b> · ${v['precio']} · RSI {v['rsi']} · {dist}")
 
         send_telegram(
-            f"📊 <b>SISTEMA SIRIO — Resumen {vela_nom}</b>\n"
-            f"🕐 {hora_et()}\n"
-            f"⏱ 30 min para el cierre de vela — decide antes\n\n"
-            f"{txt_act}"
-            f"{txt_cer}\n\n"
-            f"<b>💡 Para swing:</b> si el precio está tocando SMA8 con vela "
-            f"de confirmación, este es el momento de entrar antes de la "
-            f"formación de la próxima vela 4H.\n\n"
-            f"<i>Sistema Sirio v6 — Solares</i> 🌟"
+            f"🔄 <b>Sirio — señal sigue activa</b>\n"
+            f"🕐 {hora_et()}\n\n"
+            + "\n".join(lines)
+            + f"\n\n<i>Sistema Sirio v7 — Solares</i> 🌟"
         )
         enviados.append(clave)
         estado["resumen_4h"] = enviados
         guardar_estado(estado)
-        print(f"  [4H] Resumen {clave} enviado ({len(activas)} activas, {len(cerradas)} cerradas)")
+        print(f"  [4H] {clave} — {len(activas)} señal(es) activa(s), alerta enviada.")
 
 
 
@@ -1453,26 +1439,17 @@ def main():
         skips_txt = " · ".join(f"{mapa.get(k,k)}:{v}" for k,v in top5) if top5 else "sin datos"
         señales_hoy = count + nuevas
         if es_ultimo_scan and señales_hoy == 0:
-            titulo = "🔔 <b>Cierre — sin señales hoy</b>"
-            pie    = "<i>Mañana con ojos frescos. Estás protegida.</i>"
+            msg_status = "⚪ Sin resultados."
         elif es_ultimo_scan:
-            titulo = f"🔔 <b>Cierre — {señales_hoy} señal(es) enviada(s) hoy</b>"
-            pie    = "<i>Revisar backtest mañana.</i>"
+            msg_status = f"🔔 Cierre · {señales_hoy} señal(es) hoy."
         elif señales_hoy > 0:
-            titulo = f"📡 <b>Sirio activo</b> — {señales_hoy} señal(es) hoy · sin nuevas en este scan"
-            pie    = "<i>Sirio sigue monitoreando.</i>"
+            msg_status = f"📡 {señales_hoy} señal(es) hoy · sin nuevas ahora."
         else:
-            titulo = "📭 <b>Sin señales</b> — mercado sin setups válidos"
-            pie    = "<i>Esperar es la posición. Estás protegida.</i>"
+            msg_status = "⚪ Sin resultados."
 
         ok_sc = send_telegram(
-            f"🔭 <b>SISTEMA SIRIO — Solares</b>\n"
-            f"🕐 {hora_et()}\n\n"
-            f"⚙️ {len(pendientes)} tickers escaneados\n"
-            f"{titulo}\n"
-            f"\n<b>Filtros:</b> {skips_txt}\n"
-            f"\n{pie}\n\n"
-            f"<i>Sistema Sirio v7 — Solares</i> 🌟"
+            f"<b>Sirio v7</b> · {hora_et()}\n"
+            f"{msg_status}"
         )
         if ok_sc:
             estado["ts_ultimo_mensaje"]         = time.time()

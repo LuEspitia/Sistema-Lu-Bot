@@ -60,7 +60,7 @@ def cargar_estado():
         with open(CONFIG["state_file"],"r",encoding="utf-8") as f:
             e=json.load(f)
         if e.get("fecha")!=str(date.today()):
-            return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,
+            return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,"primera_alerta_hora":{},
                     "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"count":0}
         # Compatibilidad con versiones anteriores
         if "largo_enviado" not in e:
@@ -71,9 +71,11 @@ def cargar_estado():
             e["sin_coincidencias_enviado"] = False
         if "heartbeat_enviado" not in e:
             e["heartbeat_enviado"] = False
+        if "primera_alerta_hora" not in e:
+            e["primera_alerta_hora"] = {}
         return e
     except:
-        return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,
+        return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,"primera_alerta_hora":{},
                 "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"count":0}
 
 def guardar_estado(e):
@@ -606,7 +608,17 @@ def obtener_datos(ticker):
         vh=float(v.iloc[-1]) if float(v.iloc[-1])>0 else float(v.iloc[-2])
         vp=float(v.iloc[-20:].mean())
         vol_r,vh_proy=proyectar_volumen(vh,vp)
-        ath_52w=float(h.iloc[-252:].max()) if len(h)>=252 else float(h.max())
+        # ATH 52 semanas: priorizar fast_info (dato real del exchange)
+        # Si no disponible, caer a history. Esto evita que un nuevo máximo intraday
+        # quede == precio_actual y anule el filtro de proximidad ATH.
+        try:
+            ath_fi = float(getattr(fi, "fifty_two_week_high", None) or 0)
+        except:
+            ath_fi = 0
+        if ath_fi > 0:
+            ath_52w = ath_fi
+        else:
+            ath_52w = float(h.iloc[-252:].max()) if len(h)>=252 else float(h.max())
         mv,sv,hv_m,me=calc_macd(c); av,dip,dim,ae=calc_adx(h,l,c)
         atr_val=calc_atr(h,l,c); vela_patron,vela_fuerza=detectar_velas(hist)
         nombre=ticker; sector="N/A"; beta=None
@@ -1202,6 +1214,7 @@ def main():
     tickers       = obtener_universo()
     largo_enviado = estado.get("largo_enviado", [])
     actualizaciones_hoy = estado.get("actualizaciones_hoy", {})
+    primera_alerta_hora = estado.get("primera_alerta_hora", {})
 
     pendientes = tickers
     print(f"\nUniverso a revisar: {len(pendientes)} | "
@@ -1253,16 +1266,17 @@ def main():
             print(f"    skip: {tend_sem}")
             razones["semanal"] = razones.get("semanal", 0) + 1; continue
 
-        # ── FILTRO ATH — FIX #2 ─────────────────────────────
-        # No recomendar si el precio está dentro del 5% del ATH 52s.
-        # Estadísticamente el precio choca con esa resistencia y rebota.
-        # Excepción: si ya superó el ATH (ruptura confirmada), dejar pasar.
+        # ── FILTRO ATH 52s — 25% MÍNIMO ────────────────────
+        # Swing 5-10 días necesita ≥25% de espacio bajo el ATH 52s.
+        # Con menos margen el precio topa resistencia antes de completar el swing.
+        # Regla Lu: precio debe estar al menos 25% bajo el máximo histórico de 52s.
+        # Excepción: precio > ATH (ruptura confirmada) → dejar pasar.
         ath_v = d.get("ath_52w", 0)
         if ath_v and ath_v > 0 and d["precio"] > 0:
             dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
-            if 0 < dist_ath_pct <= 5.0:
-                print(f"    skip: zona ATH — precio a {dist_ath_pct:.1f}% del ATH 52s "
-                      f"({ath_v:.2f}) — resistencia estadística alta")
+            if 0 < dist_ath_pct <= 25.0:
+                print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% bajo máximo "
+                      f"({ath_v:.2f}) — swing necesita ≥25% de espacio")
                 razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
                 continue
 
@@ -1278,11 +1292,26 @@ def main():
             razones["extendida"] = razones.get("extendida", 0) + 1
             continue
 
-        # ── FIX #1 + #4 — 1 actualización por día por ticker ─
-        # Si ya se envió una actualización hoy para este ticker, skip.
-        if es_repetido and actualizaciones_hoy.get(ticker, False):
-            print(f"    skip: actualización de {ticker} ya enviada hoy")
-            continue
+        # ── COOLDOWN ACTUALIZACIÓN — mínimo 2h entre señal inicial y update ──
+        # Reglas:
+        #  1. Máx 1 actualización por ticker por día
+        #  2. Mínimo 120 min desde la señal inicial
+        #  3. Fail-safe: si no hay timestamp (cache miss), NO enviar update — evitar spam
+        if es_repetido:
+            if actualizaciones_hoy.get(ticker, False):
+                print(f"    skip: actualización de {ticker} ya enviada hoy")
+                continue
+            ts_inicial = primera_alerta_hora.get(ticker)
+            if not ts_inicial:
+                # Sin timestamp = estado perdido por cache miss → skip update (fail-safe)
+                print(f"    skip: {ticker} sin timestamp de señal inicial (cache miss) — no update")
+                razones["cooldown"] = razones.get("cooldown", 0) + 1
+                continue
+            mins_desde_alerta = (time.time() - ts_inicial) / 60
+            if mins_desde_alerta < 120:
+                print(f"    skip: cooling-off {ticker} — {mins_desde_alerta:.0f}min < 120min mínimo")
+                razones["cooldown"] = razones.get("cooldown", 0) + 1
+                continue
 
         print(f"  ⭐ FAN 4/4 | Score {a['score']}/100 | "
               f"{'ACTUALIZACIÓN' if es_repetido else 'NUEVA SEÑAL'} | "
@@ -1309,12 +1338,14 @@ def main():
                 ya.append(ticker)
             if not es_repetido:
                 largo_enviado.append(ticker)
+                primera_alerta_hora[ticker] = time.time()  # timestamp para cooldown
             else:
                 # Marcar actualización enviada para no repetirla hoy
                 actualizaciones_hoy[ticker] = True
             estado["alertados"]          = ya
             estado["largo_enviado"]      = largo_enviado
             estado["actualizaciones_hoy"] = actualizaciones_hoy
+            estado["primera_alerta_hora"]  = primera_alerta_hora
             estado["count"]              = count + nuevas
             guardar_estado(estado)
             registrar_backtest(ticker, d["precio"], pos["stop"],

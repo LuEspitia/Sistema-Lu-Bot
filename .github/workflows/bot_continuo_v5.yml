@@ -16,6 +16,15 @@ on:
     # El código corta automáticamente si hora_et >= 16:00.
   workflow_dispatch:
 
+# ── CONCURRENCY: evita runs paralelos ────────────────────────
+# Si se disparan dos runs al mismo tiempo (schedule + dispatch manual,
+# o dos dispatches), el segundo ESPERA en cola hasta que el primero
+# termine y guarde su cache en /tmp/sirio_alertas_hoy.json.
+# cancel-in-progress: false → NUNCA cancela el run activo (perdería el estado).
+concurrency:
+  group: sirio-diario
+  cancel-in-progress: false
+
 jobs:
   escanear:
     runs-on: ubuntu-latest

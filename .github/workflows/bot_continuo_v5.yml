@@ -20,7 +20,7 @@ jobs:
   escanear:
     runs-on: ubuntu-latest
     env:
-      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - uses: actions/checkout@v4.2.2
@@ -37,9 +37,9 @@ jobs:
         uses: actions/cache@v4.2.3
         with:
           path: /tmp/sirio_alertas_hoy.json
-          key: sirio-v6-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
+          key: sirio-v7-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
           restore-keys: |
-            sirio-v6-${{ steps.fecha.outputs.hoy }}-
+            sirio-v7-${{ steps.fecha.outputs.hoy }}-
 
       - name: Verificar estado restaurado
         run: |

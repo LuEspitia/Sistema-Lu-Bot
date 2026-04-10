@@ -73,9 +73,12 @@ def cargar_estado():
             e["heartbeat_enviado"] = False
         if "primera_alerta_hora" not in e:
             e["primera_alerta_hora"] = {}
+        if "ts_ultimo_sin_senal" not in e:
+            e["ts_ultimo_sin_senal"] = 0
         return e
     except:
-        return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,"primera_alerta_hora":{},
+        return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,
+                "primera_alerta_hora":{},"ts_ultimo_sin_senal":0,
                 "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"count":0}
 
 def guardar_estado(e):
@@ -1360,34 +1363,50 @@ def main():
 
     print(f"\nFin: {nuevas} señales nuevas | Total hoy: {count+nuevas} | Skips: {razones}")
 
-    # ── "Sin coincidencias" — MEJORADO ──────────────────────
-    # Se envía si:
-    #  (a) No hubo señales hoy Y aún no se envió (primera vez del día, evita spam)
-    #  (b) Es el último scan (≥15:25 ET) Y count==0 → aviso de cierre FORZADO
-    # Garantiza que Lu SIEMPRE recibe al menos un mensaje si no hubo señales.
-    es_ultimo_scan  = (hora_act == 15 and min_act >= 25) or (hora_act > 15)
-    ya_enviado_hoy  = estado.get("sin_coincidencias_enviado", False)
-    debe_notificar  = (not ya_enviado_hoy) or (es_ultimo_scan and count == 0)
+    # ── STATUS DE ESCANEO — siempre notifica, rate-limit 2h ─────────────────
+    # Reglas:
+    #  - Primer mensaje del día (detallado): siempre que hayan pasado ≥2h desde el último
+    #  - Último scan del día (≥15:25 ET): forzado si count==0
+    #  - Runs intermedios: mensaje corto tipo "scan N completado" si pasaron ≥2h
+    # Esto garantiza que Lu sabe que Sirio está vivo sin recibir 8 mensajes iguales.
+    es_ultimo_scan   = (hora_act == 15 and min_act >= 25) or (hora_act > 15)
+    ts_ultimo_sc     = estado.get("ts_ultimo_sin_senal", 0)  # Unix timestamp del último aviso
+    mins_desde_aviso = (time.time() - ts_ultimo_sc) / 60 if ts_ultimo_sc else 9999
+    es_primer_aviso  = (mins_desde_aviso >= 120) or es_ultimo_scan  # cada 2h o forzado al cierre
 
-    if nuevas == 0 and count == 0 and debe_notificar:
+    if nuevas == 0 and count == 0 and es_primer_aviso:
         mapa = {"fan":"Fan SMA incompleto","score":"Score bajo mínimo",
                 "earnings":"Earnings próximos","semanal":"Semanal bajista",
                 "tardia":"Señal tardía","error":"Error de datos",
-                "cerca_ath":"Zona ATH (resistencia)","extendida":"Extendida >2% SMA8"}
+                "cerca_ath":"ATH 52s <25% espacio","extendida":"Extendida >2% SMA8",
+                "cooldown":"Cooldown actualización","cooling":"Cooldown actualización",
+                "vol_bajo":"Volumen bajo mínimo","rsi_extremo":"RSI sobrecomprado",
+                "renta_fija":"ETF renta fija"}
         skips_txt = "\n".join(f"  · {mapa.get(k,k)}: {v}"
-                              for k,v in razones.items()) if razones else ""
-        label_cierre = "🔔 <b>Cierre del día sin señales</b>" if es_ultimo_scan else "📭 <b>Sin coincidencias</b> — sin señales activas hoy"
+                              for k,v in sorted(razones.items(),
+                              key=lambda x:x[1], reverse=True)) if razones else "  · Sin datos de filtrado"
+        if es_ultimo_scan:
+            titulo  = "🔔 <b>Cierre — sin señales en el día</b>"
+            pie     = "<i>Mañana con ojos frescos. Estás protegida.</i>"
+        elif mins_desde_aviso >= 9990:
+            titulo  = "📭 <b>Sin coincidencias</b> — primer escaneo del día"
+            pie     = "<i>Esperar es la posición. Estás protegida.</i>"
+        else:
+            titulo  = "⚙️ <b>Sirio activo</b> — sin señales en este escaneo"
+            pie     = "<i>Sirio sigue vivo y monitoreando.</i>"
+
         ok_sc = send_telegram(
             f"🔭 <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()}\n\n"
-            f"⚙️ Universo escaneado: <b>{len(pendientes)} tickers</b>\n"
-            f"{label_cierre}\n"
-            + (f"\n<b>Motivos de filtrado:</b>\n{skips_txt}\n" if skips_txt else "")
-            + f"\n<i>Esperar es la posición. Estás protegida.</i>\n\n"
+            f"📊 Universo escaneado: <b>{len(pendientes)} tickers</b>\n"
+            f"{titulo}\n"
+            f"\n<b>Filtros activos hoy:</b>\n{skips_txt}\n"
+            f"\n{pie}\n\n"
             f"<i>Sistema Sirio v7 — Solares</i> 🌟"
         )
         if ok_sc:
-            estado["sin_coincidencias_enviado"] = True
+            estado["ts_ultimo_sin_senal"] = time.time()
+            estado["sin_coincidencias_enviado"] = True  # compatibilidad
             guardar_estado(estado)
 
 if __name__ == "__main__":

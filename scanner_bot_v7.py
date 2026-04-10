@@ -20,9 +20,39 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
 
 import anthropic
 
-ET = timezone(timedelta(hours=-4))
+# ── TIMEZONE — DST automático (EDT/EST) via zoneinfo ─────────────────────
+try:
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+except ImportError:
+    ET = timezone(timedelta(hours=-4))  # fallback Python <3.9
+
 def hora_et():
     return datetime.now(ET).strftime("%d/%m/%Y  %H:%M ET")
+
+def es_dia_festivo_nyse():
+    """Retorna (bool, nombre) si NYSE está cerrado hoy. Lista 2025-2027."""
+    from datetime import date as _d
+    hoy = _d.today()
+    festivos = {
+        _d(2025,1,1):"New Year's Day",_d(2025,1,20):"MLK Day",
+        _d(2025,2,17):"Presidents Day",_d(2025,4,18):"Good Friday",
+        _d(2025,5,26):"Memorial Day",_d(2025,6,19):"Juneteenth",
+        _d(2025,7,4):"Independence Day",_d(2025,9,1):"Labor Day",
+        _d(2025,11,27):"Thanksgiving",_d(2025,12,25):"Christmas",
+        _d(2026,1,1):"New Year's Day",_d(2026,1,19):"MLK Day",
+        _d(2026,2,16):"Presidents Day",_d(2026,4,3):"Good Friday",
+        _d(2026,5,25):"Memorial Day",_d(2026,6,19):"Juneteenth",
+        _d(2026,7,3):"Independence Day",_d(2026,9,7):"Labor Day",
+        _d(2026,11,26):"Thanksgiving",_d(2026,12,25):"Christmas",
+        _d(2027,1,1):"New Year's Day",_d(2027,1,18):"MLK Day",
+        _d(2027,2,15):"Presidents Day",_d(2027,3,26):"Good Friday",
+        _d(2027,5,31):"Memorial Day",_d(2027,6,18):"Juneteenth",
+        _d(2027,7,5):"Independence Day",_d(2027,9,6):"Labor Day",
+        _d(2027,11,25):"Thanksgiving",_d(2027,12,24):"Christmas",
+    }
+    nombre = festivos.get(hoy)
+    return (nombre is not None, nombre or "")
 
 CONFIG = {
     "capital_usd":         33140,
@@ -75,11 +105,17 @@ def cargar_estado():
             e["primera_alerta_hora"] = {}
         if "ts_ultimo_sin_senal" not in e:
             e["ts_ultimo_sin_senal"] = 0
+        if "ts_ultimo_mensaje" not in e:
+            e["ts_ultimo_mensaje"] = 0
+        if "festivo_enviado" not in e:
+            e["festivo_enviado"] = False
+        if "mensajes_hoy" not in e:
+            e["mensajes_hoy"] = 0
         return e
     except:
         return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,
-                "primera_alerta_hora":{},"ts_ultimo_sin_senal":0,
-                "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"count":0}
+                "primera_alerta_hora":{},"ts_ultimo_sin_senal":0,"ts_ultimo_mensaje":0,
+                "festivo_enviado":False,"actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"mensajes_hoy":0,"count":0}
 
 def guardar_estado(e):
     try:
@@ -1177,39 +1213,68 @@ def main():
     ya      = estado.get("alertados", [])
     count   = estado.get("count", 0)
 
-    # ── GUARDIA POST-MERCADO ─────────────────────────────────
-    # Después de las 16:00 ET solo se ejecuta el resumen 4H — sin alertas nuevas.
-    # Las siguientes notificaciones van al día siguiente 2h antes de apertura (7:30am ET).
     ahora_et  = datetime.now(ET)
     hora_act  = ahora_et.hour
     min_act   = ahora_et.minute
-    post_cierre = (hora_act > 16) or (hora_act == 16 and min_act > 0)
 
+    # ── GUARDIA: FESTIVO NYSE ────────────────────────────────
+    es_festivo, nombre_festivo = es_dia_festivo_nyse()
+    if es_festivo:
+        if not estado.get("festivo_enviado", False):
+            ok_f = send_telegram(
+                f"📅 <b>SISTEMA SIRIO — Festivo NYSE</b>\n"
+                f"🕐 {hora_et()}\n\n"
+                f"🏛 <b>{nombre_festivo}</b> — NYSE cerrado hoy\n"
+                f"Sirio no escaneará. Próximo día hábil activo.\n\n"
+                f"<i>Sistema Sirio v7 — Solares</i> 🌟"
+            )
+            if ok_f:
+                estado["festivo_enviado"] = True
+                guardar_estado(estado)
+        print(f"📅 Festivo NYSE: {nombre_festivo} — saliendo.")
+        return
+
+    # ── GUARDIA: FUERA DE HORARIO ────────────────────────────
+    # Antes de 7am ET: demasiado temprano, salir silencioso
+    if hora_act < 7:
+        print(f"⏸ Muy temprano ({hora_act}:{min_act:02d} ET) — esperando 7:00am ET.")
+        return
+
+    post_cierre = (hora_act > 16) or (hora_act == 16 and min_act > 0)
     if post_cierre:
-        print("⏹ Después del cierre (16:00 ET) — solo resumen 4H, sin alertas nuevas.")
+        print("⏹ Después del cierre — solo resumen 4H.")
         enviar_resumen_4h(estado)
         return
 
-    # ── HEARTBEAT PRE-MARKET (7:30am ET) ────────────────────
-    # Primer run del día — confirma que Sirio está vivo y escaneando.
-    # Solo se envía si aún no se envió hoy (evitar duplicado por workflow_dispatch).
-    es_premarket = (hora_act == 7) or (hora_act == 6 and min_act >= 50)
-    if es_premarket and not estado.get("heartbeat_enviado", False):
+    # ── HEARTBEAT — primer mensaje del día ──────────────────
+    # Una sola vez por día. Informa zona horaria activa (EDT/EST auto).
+    if not estado.get("heartbeat_enviado", False):
         vix_hb, vix_nivel_hb = get_vix()
         vix_str_hb = f"{vix_hb} ({vix_nivel_hb})" if vix_hb else "N/D"
+        label_m = "🌅 Pre-Market" if hora_act < 9 else ("🔔 Apertura" if hora_act < 10 else "📡 En curso")
+        try:
+            off_h = ahora_et.utcoffset().total_seconds() / 3600
+            zona_txt = "EDT (UTC-4)" if off_h == -4 else "EST (UTC-5)"
+        except Exception:
+            zona_txt = "ET"
         hb_ok = send_telegram(
-            f"🌅 <b>SISTEMA SIRIO — Pre-Market</b>\n"
-            f"🕐 {hora_et()}\n\n"
-            f"✅ Sirio activo y escaneando\n"
-            f"⚙️ Universo: ~490 tickers | Score mín: 65/100\n"
+            f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
+            f"🕐 {hora_et()} · {zona_txt}\n\n"
+            f"✅ Sirio activo · primer escaneo del día\n"
+            f"⚙️ ~490 tickers · score ≥65 · ATH ≥25% · fan 4/4\n"
             f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
-            f"<i>Señales activas → notificación inmediata durante el día.</i>\n"
-            f"<i>Sin señales → aviso al cierre 3:30pm ET.</i>\n\n"
+            f"<i>Señal nueva → aviso inmediato.</i>\n"
+            f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"
             f"<i>Sistema Sirio v7 — Solares</i> 🌟"
         )
         if hb_ok:
             estado["heartbeat_enviado"] = True
+            estado["ts_ultimo_mensaje"] = time.time()
+            estado["mensajes_hoy"]      = estado.get("mensajes_hoy", 0) + 1
             guardar_estado(estado)
+            print("  [HB] Heartbeat enviado OK ✅")
+        else:
+            print("⚠️⚠️⚠️  TELEGRAM NO RESPONDE — verificar TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en Secrets  ⚠️⚠️⚠️")
 
     # Verificar si toca enviar resumen de 4H (independiente de señales)
     enviar_resumen_4h(estado)
@@ -1350,12 +1415,15 @@ def main():
             estado["actualizaciones_hoy"] = actualizaciones_hoy
             estado["primera_alerta_hora"]  = primera_alerta_hora
             estado["count"]              = count + nuevas
+            estado["ts_ultimo_mensaje"]  = time.time()  # reset reloj de silencio
             guardar_estado(estado)
             registrar_backtest(ticker, d["precio"], pos["stop"],
                                pos["t1"], pos["t2"], pos["t3"],
                                a["score"], ia["senal"], d.get("vela_patron",""))
             guardar_en_diario(ticker, d["precio"], a["fan"],
                               datos_sent, ia["senal"], d.get("vela_patron",""))
+            estado["ts_ultimo_mensaje"] = time.time()
+            estado["mensajes_hoy"]      = estado.get("mensajes_hoy", 0) + 1
             tipo = "actualización" if es_repetido else "nueva señal"
             print(f"  ✅ Enviado como {tipo} (total hoy: {count+nuevas})")
         else:
@@ -1363,50 +1431,54 @@ def main():
 
     print(f"\nFin: {nuevas} señales nuevas | Total hoy: {count+nuevas} | Skips: {razones}")
 
-    # ── STATUS DE ESCANEO — siempre notifica, rate-limit 2h ─────────────────
+    # ── STATUS PERIÓDICO — lógica de notificación ───────────────────────────
     # Reglas:
-    #  - Primer mensaje del día (detallado): siempre que hayan pasado ≥2h desde el último
-    #  - Último scan del día (≥15:25 ET): forzado si count==0
-    #  - Runs intermedios: mensaje corto tipo "scan N completado" si pasaron ≥2h
-    # Esto garantiza que Lu sabe que Sirio está vivo sin recibir 8 mensajes iguales.
-    es_ultimo_scan   = (hora_act == 15 and min_act >= 25) or (hora_act > 15)
-    ts_ultimo_sc     = estado.get("ts_ultimo_sin_senal", 0)  # Unix timestamp del último aviso
-    mins_desde_aviso = (time.time() - ts_ultimo_sc) / 60 if ts_ultimo_sc else 9999
-    es_primer_aviso  = (mins_desde_aviso >= 120) or es_ultimo_scan  # cada 2h o forzado al cierre
+    #  1. Señal nueva en este run → ya se notificó, no duplicar
+    #  2. ≥60 min desde cualquier mensaje → status breve
+    #  3. Último scan del día (15:25+) → forzar siempre
+    #  4. mensajes_hoy==0 al final del run → safety net (nunca día vacío)
+    es_ultimo_scan  = (hora_act == 15 and min_act >= 25) or (hora_act > 15)
+    ts_ultimo_msg   = estado.get("ts_ultimo_mensaje", 0)
+    mins_silencio   = (time.time() - ts_ultimo_msg) / 60 if ts_ultimo_msg else 9999
+    mensajes_hoy    = estado.get("mensajes_hoy", 0)
+    safety_net      = (mensajes_hoy == 0)
+    debe_status     = (nuevas == 0) and ((mins_silencio >= 60) or es_ultimo_scan or safety_net)
 
-    if nuevas == 0 and count == 0 and es_primer_aviso:
-        mapa = {"fan":"Fan SMA incompleto","score":"Score bajo mínimo",
-                "earnings":"Earnings próximos","semanal":"Semanal bajista",
-                "tardia":"Señal tardía","error":"Error de datos",
-                "cerca_ath":"ATH 52s <25% espacio","extendida":"Extendida >2% SMA8",
-                "cooldown":"Cooldown actualización","cooling":"Cooldown actualización",
-                "vol_bajo":"Volumen bajo mínimo","rsi_extremo":"RSI sobrecomprado",
-                "renta_fija":"ETF renta fija"}
-        skips_txt = "\n".join(f"  · {mapa.get(k,k)}: {v}"
-                              for k,v in sorted(razones.items(),
-                              key=lambda x:x[1], reverse=True)) if razones else "  · Sin datos de filtrado"
-        if es_ultimo_scan:
-            titulo  = "🔔 <b>Cierre — sin señales en el día</b>"
-            pie     = "<i>Mañana con ojos frescos. Estás protegida.</i>"
-        elif mins_desde_aviso >= 9990:
-            titulo  = "📭 <b>Sin coincidencias</b> — primer escaneo del día"
-            pie     = "<i>Esperar es la posición. Estás protegida.</i>"
+    if debe_status:
+        mapa = {"fan":"Fan 4/4","score":"Score<65","earnings":"Earnings",
+                "semanal":"Semanal baj.","tardia":"Tardía","error":"Error datos",
+                "cerca_ath":"ATH<25%","extendida":">2%SMA8",
+                "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80"}
+        top5 = sorted(razones.items(), key=lambda x:x[1], reverse=True)[:5]
+        skips_txt = " · ".join(f"{mapa.get(k,k)}:{v}" for k,v in top5) if top5 else "sin datos"
+        señales_hoy = count + nuevas
+        if es_ultimo_scan and señales_hoy == 0:
+            titulo = "🔔 <b>Cierre — sin señales hoy</b>"
+            pie    = "<i>Mañana con ojos frescos. Estás protegida.</i>"
+        elif es_ultimo_scan:
+            titulo = f"🔔 <b>Cierre — {señales_hoy} señal(es) enviada(s) hoy</b>"
+            pie    = "<i>Revisar backtest mañana.</i>"
+        elif señales_hoy > 0:
+            titulo = f"📡 <b>Sirio activo</b> — {señales_hoy} señal(es) hoy · sin nuevas en este scan"
+            pie    = "<i>Sirio sigue monitoreando.</i>"
         else:
-            titulo  = "⚙️ <b>Sirio activo</b> — sin señales en este escaneo"
-            pie     = "<i>Sirio sigue vivo y monitoreando.</i>"
+            titulo = "📭 <b>Sin señales</b> — mercado sin setups válidos"
+            pie    = "<i>Esperar es la posición. Estás protegida.</i>"
 
         ok_sc = send_telegram(
             f"🔭 <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()}\n\n"
-            f"📊 Universo escaneado: <b>{len(pendientes)} tickers</b>\n"
+            f"⚙️ {len(pendientes)} tickers escaneados\n"
             f"{titulo}\n"
-            f"\n<b>Filtros activos hoy:</b>\n{skips_txt}\n"
+            f"\n<b>Filtros:</b> {skips_txt}\n"
             f"\n{pie}\n\n"
             f"<i>Sistema Sirio v7 — Solares</i> 🌟"
         )
         if ok_sc:
-            estado["ts_ultimo_sin_senal"] = time.time()
-            estado["sin_coincidencias_enviado"] = True  # compatibilidad
+            estado["ts_ultimo_mensaje"]         = time.time()
+            estado["ts_ultimo_sin_senal"]       = time.time()
+            estado["sin_coincidencias_enviado"] = True
+            estado["mensajes_hoy"]              = estado.get("mensajes_hoy", 0) + 1
             guardar_estado(estado)
 
 if __name__ == "__main__":

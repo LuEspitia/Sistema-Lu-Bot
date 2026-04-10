@@ -60,13 +60,19 @@ def cargar_estado():
         with open(CONFIG["state_file"],"r",encoding="utf-8") as f:
             e=json.load(f)
         if e.get("fecha")!=str(date.today()):
-            return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"count":0}
+            return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],
+                    "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"count":0}
         # Compatibilidad con versiones anteriores
         if "largo_enviado" not in e:
             e["largo_enviado"] = list(e.get("alertados",[]))
+        if "actualizaciones_hoy" not in e:
+            e["actualizaciones_hoy"] = {}
+        if "sin_coincidencias_enviado" not in e:
+            e["sin_coincidencias_enviado"] = False
         return e
     except:
-        return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"count":0}
+        return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],
+                "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"count":0}
 
 def guardar_estado(e):
     try:
@@ -584,7 +590,7 @@ def obtener_datos(ticker):
     try:
         s=yf.Ticker(ticker)
         hist=s.history(period="1y",interval="1d",prepost=True)
-        if hist.empty or len(hist)<210: return {"ticker":ticker,"error":"Datos insuficientes"}
+        if hist.empty or len(hist)<60: return {"ticker":ticker,"error":"Datos insuficientes"}
         c,h,l,v=hist["Close"],hist["High"],hist["Low"],hist["Volume"]
         prev=float(c.iloc[-2]); es_pm=False; precio=float(c.iloc[-1])
         try:
@@ -1147,21 +1153,34 @@ def enviar_resumen_4h(estado):
 
 def main():
     print(f"\n{'='*55}")
-    print(f"  SISTEMA SIRIO — Solares v6   {hora_et()}")
+    print(f"  SISTEMA SIRIO — Solares v7   {hora_et()}")
     print(f"{'='*55}\n")
 
     estado  = cargar_estado()
     ya      = estado.get("alertados", [])
     count   = estado.get("count", 0)
 
+    # ── GUARDIA POST-MERCADO ─────────────────────────────────
+    # Después de las 16:00 ET solo se ejecuta el resumen 4H — sin alertas nuevas.
+    # Las siguientes notificaciones van al día siguiente 2h antes de apertura (7:30am ET).
+    ahora_et  = datetime.now(ET)
+    hora_act  = ahora_et.hour
+    min_act   = ahora_et.minute
+    post_cierre = (hora_act > 16) or (hora_act == 16 and min_act > 0)
+
+    if post_cierre:
+        print("⏹ Después del cierre (16:00 ET) — solo resumen 4H, sin alertas nuevas.")
+        enviar_resumen_4h(estado)
+        return
+
     # Verificar si toca enviar resumen de 4H (independiente de señales)
     enviar_resumen_4h(estado)
 
-    tickers    = obtener_universo()
+    tickers       = obtener_universo()
     largo_enviado = estado.get("largo_enviado", [])
-    # Los tickers con mensaje largo ya enviado se re-escanean para actualizaciones
-    # Los que nunca se alertaron se escanean para señal nueva
-    pendientes = tickers  # escanear todo el universo cada hora
+    actualizaciones_hoy = estado.get("actualizaciones_hoy", {})
+
+    pendientes = tickers
     print(f"\nUniverso a revisar: {len(pendientes)} | "
           f"Señales nuevas posibles: {len(pendientes)-len(largo_enviado)} | "
           f"Actualizaciones posibles: {len(largo_enviado)}\n")
@@ -1181,16 +1200,16 @@ def main():
         # ── Filtros técnicos ──
         if a["fan"] < CONFIG["min_fan_to_alert"] or not a["en_rango"] or not a["vol_ok"]:
             razones["fan"] = razones.get("fan", 0) + 1; continue
-        # Volumen ratio mínimo 0.7x — evita señales sin participación real
+        # Volumen ratio mínimo 0.7x
         if a["vol_r"] < 0.7:
             print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
             razones["vol_bajo"] = razones.get("vol_bajo", 0) + 1; continue
-        # RSI sobrecomprado extremo — RSI > 80 no es zona de entrada swing
+        # RSI sobrecomprado extremo
         rsi_v_check = d.get("rsi", 0) or 0
         if rsi_v_check > 80:
             print(f"    skip: RSI {rsi_v_check:.0f} > 80 sobrecomprado extremo")
             razones["rsi_extremo"] = razones.get("rsi_extremo", 0) + 1; continue
-        # ETFs de renta fija — no aplican para swing (precio casi no se mueve)
+        # ETFs de renta fija
         nombre_check = d.get("nombre","").lower()
         if d.get("sector","") in ("","N/A") and any(w in nombre_check for w in
                 ["treasury","bond","rate","fixed","floating","ultra short","t-bill"]):
@@ -1211,19 +1230,35 @@ def main():
             print(f"    skip: {tend_sem}")
             razones["semanal"] = razones.get("semanal", 0) + 1; continue
 
-        # ── Señal válida — verificar zona de entrada ──────────
+        # ── FILTRO ATH — FIX #2 ─────────────────────────────
+        # No recomendar si el precio está dentro del 5% del ATH 52s.
+        # Estadísticamente el precio choca con esa resistencia y rebota.
+        # Excepción: si ya superó el ATH (ruptura confirmada), dejar pasar.
+        ath_v = d.get("ath_52w", 0)
+        if ath_v and ath_v > 0 and d["precio"] > 0:
+            dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
+            if 0 < dist_ath_pct <= 5.0:
+                print(f"    skip: zona ATH — precio a {dist_ath_pct:.1f}% del ATH 52s "
+                      f"({ath_v:.2f}) — resistencia estadística alta")
+                razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
+                continue
+
+        # ── Verificar zona de entrada ─────────────────────────
         largo_enviado = estado.get("largo_enviado", [])
         es_repetido   = ticker in largo_enviado
 
-        # Calcular distancia al SMA8
         sma8v    = d.get("sma8") or 0
         dist_s8  = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
 
-        # REGLA CLAVE: si está extendida (>2% sobre SMA8), no enviar nada
-        # No tiene sentido alertar una entrada que ya se fue
         if dist_s8 > 2.0:
             print(f"    skip señal: extendida {dist_s8:.1f}% sobre SMA8 — sin entrada")
             razones["extendida"] = razones.get("extendida", 0) + 1
+            continue
+
+        # ── FIX #1 + #4 — 1 actualización por día por ticker ─
+        # Si ya se envió una actualización hoy para este ticker, skip.
+        if es_repetido and actualizaciones_hoy.get(ticker, False):
+            print(f"    skip: actualización de {ticker} ya enviada hoy")
             continue
 
         print(f"  ⭐ FAN 4/4 | Score {a['score']}/100 | "
@@ -1247,15 +1282,17 @@ def main():
 
         if ok:
             nuevas += 1
-            # Registrar en alertados (para el "sin coincidencias")
             if ticker not in ya:
                 ya.append(ticker)
-            # Registrar en largo_enviado solo si era nueva señal
             if not es_repetido:
                 largo_enviado.append(ticker)
-            estado["alertados"]     = ya
-            estado["largo_enviado"] = largo_enviado
-            estado["count"]         = count + nuevas
+            else:
+                # Marcar actualización enviada para no repetirla hoy
+                actualizaciones_hoy[ticker] = True
+            estado["alertados"]          = ya
+            estado["largo_enviado"]      = largo_enviado
+            estado["actualizaciones_hoy"] = actualizaciones_hoy
+            estado["count"]              = count + nuevas
             guardar_estado(estado)
             registrar_backtest(ticker, d["precio"], pos["stop"],
                                pos["t1"], pos["t2"], pos["t3"],
@@ -1269,23 +1306,28 @@ def main():
 
     print(f"\nFin: {nuevas} señales nuevas | Total hoy: {count+nuevas} | Skips: {razones}")
 
-    # Notificar cuando no hay señales nuevas en esta pasada
-    if nuevas == 0:
+    # ── FIX #4 — "Sin coincidencias" máximo 1 vez por día ────
+    # Solo se envía si: (a) no hubo señales hoy, y (b) aún no se envió este mensaje hoy.
+    # Esto evita el spam de 7 mensajes "sin coincidencias" diarios.
+    if nuevas == 0 and count == 0 and not estado.get("sin_coincidencias_enviado", False):
         mapa = {"fan":"Fan SMA incompleto","score":"Score bajo mínimo",
                 "earnings":"Earnings próximos","semanal":"Semanal bajista",
-                "tardia":"Señal tardía","error":"Error de datos"}
+                "tardia":"Señal tardía","error":"Error de datos",
+                "cerca_ath":"Zona ATH (resistencia)","extendida":"Extendida >2% SMA8"}
         skips_txt = "\n".join(f"  · {mapa.get(k,k)}: {v}"
                               for k,v in razones.items()) if razones else ""
-        send_telegram(
+        ok_sc = send_telegram(
             f"🔭 <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()}\n\n"
             f"⚙️ Universo escaneado: <b>{len(pendientes)} tickers</b>\n"
-            f"📭 <b>Sin coincidencias</b> en esta pasada\n"
-            f"✅ Señales hoy: {count + nuevas}\n"
+            f"📭 <b>Sin coincidencias</b> — sin señales activas hoy\n"
             + (f"\n<b>Motivos de filtrado:</b>\n{skips_txt}\n" if skips_txt else "")
             + f"\n<i>Esperar es la posición. Estás protegida.</i>\n\n"
-            f"<i>Sistema Sirio v6 — Solares</i> 🌟"
+            f"<i>Sistema Sirio v7 — Solares</i> 🌟"
         )
+        if ok_sc:
+            estado["sin_coincidencias_enviado"] = True
+            guardar_estado(estado)
 
 if __name__ == "__main__":
     main()

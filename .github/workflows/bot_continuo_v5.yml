@@ -1,10 +1,22 @@
 name: Solares — Sistema Sirio Bot
 
+# ═══════════════════════════════════════════════════════════════
+#  SCHEDULING — PROBLEMA CONOCIDO DE GITHUB ACTIONS
+#  Los cron jobs internos de GitHub se retrasan o se omiten cuando
+#  el repo tiene poca actividad. Solución: disparar via API externa.
+#
+#  TRIGGERS EXTERNOS (cron-job.org) — ver instrucciones en README:
+#  Los crons de abajo son el RESPALDO. El disparador principal debe
+#  ser una llamada HTTP desde cron-job.org al endpoint workflow_dispatch.
+#  URL: https://api.github.com/repos/TU_USER/Sistema-Lu-Bot/actions/workflows/bot_continuo_v5.yml/dispatches
+# ═══════════════════════════════════════════════════════════════
+
 on:
   schedule:
-    # ─── PRE-MARKET ──────────────────────────────────────────
+    # ─── RESPALDO INTERNO (puede llegar tarde, es normal) ────────
+    # ─── PRE-MARKET ──────────────────────────────────────────────
     - cron: '30 11 * * 1-5'   #  7:30am ET — 2h antes apertura (pre-market)
-    # ─── MERCADO ABIERTO ─────────────────────────────────────
+    # ─── MERCADO ABIERTO ─────────────────────────────────────────
     - cron: '30 13 * * 1-5'   #  9:30am ET — apertura
     - cron: '30 14 * * 1-5'   # 10:30am ET
     - cron: '30 15 * * 1-5'   # 11:30am ET
@@ -12,9 +24,22 @@ on:
     - cron: '30 17 * * 1-5'   #  1:30pm ET
     - cron: '30 18 * * 1-5'   #  2:30pm ET
     - cron: '30 19 * * 1-5'   #  3:30pm ET — último escaneo + resumen 4H cierre
-    # NOTA: No hay run después de las 4pm ET.
-    # El código corta automáticamente si hora_et >= 16:00.
+    # NOTA: El código corta automáticamente si hora_et >= 16:00.
+
+  # ─── TRIGGER EXTERNO (cron-job.org lo llama por HTTP) ────────
   workflow_dispatch:
+    inputs:
+      source:
+        description: 'Origen del trigger (cron-job / manual / test)'
+        required: false
+        default: 'manual'
+
+  # ─── KEEP-ALIVE: evita que GitHub desactive el workflow ──────
+  # Un push al repo cada semana mantiene el scheduling activo.
+  # Esto lo hace el job keep_alive de abajo automáticamente.
+  push:
+    branches: [ main ]
+    paths-ignore: [ '.github/keep_alive' ]
 
 # ── CONCURRENCY: evita runs paralelos ────────────────────────
 # Si se disparan dos runs al mismo tiempo (schedule + dispatch manual,
@@ -26,6 +51,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
+  # ══════════════════════════════════════════════════════════════
+  #  JOB PRINCIPAL — escaneo del sistema Sirio
+  # ══════════════════════════════════════════════════════════════
   escanear:
     runs-on: ubuntu-latest
     env:
@@ -94,3 +123,28 @@ jobs:
             /tmp/sirio_diario_sentiment.json
           if-no-files-found: ignore
           retention-days: 90
+
+  # ══════════════════════════════════════════════════════════════
+  #  JOB KEEP-ALIVE — evita que GitHub desactive el scheduling
+  #  Se ejecuta todos los lunes a las 6am ET (10:00 UTC).
+  #  Hace un commit mínimo al repo para mantenerlo "activo".
+  # ══════════════════════════════════════════════════════════════
+  keep_alive:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '0 10 * * 1'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Keep-alive commit
+        run: |
+          git config user.name  "Sirio Keep-Alive"
+          git config user.email "sirio@solares.bot"
+          mkdir -p .github
+          echo "$(date -u +'%Y-%m-%d %H:%M UTC')" > .github/keep_alive
+          git add .github/keep_alive
+          git diff --staged --quiet || git commit -m "chore: keep-alive $(date -u +'%Y-%m-%d')"
+          git push

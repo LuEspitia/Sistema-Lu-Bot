@@ -1261,8 +1261,15 @@ def main():
         a = analizar(d)
 
         # ── Filtros técnicos ──
-        if a["fan"] < CONFIG["min_fan_to_alert"] or not a["en_rango"] or not a["vol_ok"]:
+        # FIX v7.1: Fan 3/4 permitido como señal OBSERVAR si score >= 70.
+        # Fan 4/4 sigue siendo requerido para señal ENTRAR (estandar).
+        # En mercados laterales/volatiles (VIX > 18), Fan 4/4 es muy poco frecuente.
+        fan_minimo_observar = 3
+        if a["fan"] < fan_minimo_observar or not a["en_rango"] or not a["vol_ok"]:
             razones["fan"] = razones.get("fan", 0) + 1; continue
+        # Fan 3/4: requiere score mas alto para compensar el fan incompleto
+        es_fan3 = (a["fan"] == 3)
+        score_minimo_efectivo = 70 if es_fan3 else CONFIG["score_minimo"]
         # Volumen ratio mínimo 0.7x
         if a["vol_r"] < 0.7:
             print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
@@ -1281,8 +1288,8 @@ def main():
         if a.get("senal_tardia") and a["fan"] < 4:
             print(f"    skip: tardío >2% SMA8")
             razones["tardia"] = razones.get("tardia", 0) + 1; continue
-        if a["score"] < CONFIG["score_minimo"]:
-            print(f"    skip: score {a['score']}/100")
+        if a["score"] < score_minimo_efectivo:
+            print(f"    skip: score {a['score']}/100 (min {score_minimo_efectivo}{'—fan3' if es_fan3 else ''})")
             razones["score"] = razones.get("score", 0) + 1; continue
         hay_earn, dias_earn = check_earnings_proximos(ticker)
         if hay_earn:
@@ -1297,13 +1304,16 @@ def main():
         # Swing 5-10 días necesita ≥25% de espacio bajo el ATH 52s.
         # Con menos margen el precio topa resistencia antes de completar el swing.
         # Regla Lu: precio debe estar al menos 25% bajo el máximo histórico de 52s.
-        # Excepción: precio > ATH (ruptura confirmada) → dejar pasar.
+        # FIX v7.1: eliminada la excepción de "ruptura" (dist_ath_pct < 0).
+        # Razón: yfinance.fast_info entrega el ATH con delay — un precio que supera
+        # levemente el ATH cacheado NO es una ruptura confirmada, es lag de datos.
+        # Resultado: acciones en/sobre ATH ahora quedan filtradas correctamente.
         ath_v = d.get("ath_52w", 0)
         if ath_v and ath_v > 0 and d["precio"] > 0:
             dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
-            if 0 <= dist_ath_pct <= 25.0:
-                print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% bajo máximo "
-                      f"({ath_v:.2f}) — swing necesita ≥25% de espacio")
+            if dist_ath_pct < 25.0:   # incluye negativo (en ATH o por encima)
+                print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% del maximo 52s "
+                      f"({ath_v:.2f}) — necesita >=25% de espacio")
                 razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
                 continue
 
@@ -1354,6 +1364,11 @@ def main():
 
         if es_repetido:
             msg = build_msg_corto(d, a, pos, ia, tend_sem, dist_s8)
+        elif es_fan3:
+            # Fan 3/4: señal OBSERVAR — misma estructura pero con aviso claro
+            msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
+            aviso = "\U0001f52d <b>[OBSERVAR \u2014 Fan 3/4]</b> Falta confirmar 1 SMA. Esperar cierre vela.\n\n"
+            msg = aviso + msg
         else:
             msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
 

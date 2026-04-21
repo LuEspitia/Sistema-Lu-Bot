@@ -621,11 +621,15 @@ def check_tendencia_semanal(ticker):
         c=hist["Close"]
         sma8w=float(c.iloc[-8:].mean()); sma20w=float(c.iloc[-20:].mean()); precio=float(c.iloc[-1])
         if precio>sma8w>sma20w:
-            return True,f"✅ Semanal alcista (P &gt; SMA8w {sma8w:.1f} &gt; SMA20w {sma20w:.1f})"
+            return True,f"✅ Semanal alcista (P > SMA8w {sma8w:.1f} > SMA20w {sma20w:.1f})"
         elif precio>sma20w:
             return True,f"⚠️ Semanal neutral-alcista (sobre SMA20w {sma20w:.1f})"
+        elif precio>sma8w:
+            # FIX v7.2: modo recuperacion — precio sobre SMA8w semanal aunque aun bajo SMA20w.
+            # Tras 2+ semanas alcistas, acciones en recuperacion valida pasan este filtro.
+            return True,f"🔄 Semanal recuperando (sobre SMA8w {sma8w:.1f})"
         else:
-            return False,f"❌ Semanal bajista — bajo SMA20w {sma20w:.1f}"
+            return False,f"❌ Semanal bajista — bajo SMA8w {sma8w:.1f} y SMA20w {sma20w:.1f}"
     except:
         return True,"Error timeframe semanal (OK)"
 
@@ -906,9 +910,12 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     acc = pos["acc"]
     s25 = max(1,round(acc*0.25)); s30=max(1,round(acc*0.30))
     s20x= max(1,round(acc*0.20)); s25b=max(0,acc-s25-s30-s20x)
-    ath  = d.get("ath_52w",0)
+    ath   = d.get("ath_52w",0)
+    ath_h = d.get("ath_hist",0)
     dist_ath = (f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
                 if ath>d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
+    if ath_h and ath_h > ath:
+        dist_ath += f" | Hist: {ath_h:.2f} (-{((ath_h-d['precio'])/ath_h*100):.1f}%)"
     etf_ref  = get_sector_etf(d.get("sector","N/A"))
     ia_ico   = "⭐" if ia["prob"]>=70 else "🔔" if ia["prob"]>=55 else "🔭"
     score    = a.get("score",0)
@@ -1269,7 +1276,7 @@ def main():
             razones["fan"] = razones.get("fan", 0) + 1; continue
         # Fan 3/4: requiere score mas alto para compensar el fan incompleto
         es_fan3 = (a["fan"] == 3)
-        score_minimo_efectivo = 70 if es_fan3 else CONFIG["score_minimo"]
+        score_minimo_efectivo = 65 if es_fan3 else CONFIG["score_minimo"]
         # Volumen ratio mínimo 0.7x
         if a["vol_r"] < 0.7:
             print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
@@ -1311,9 +1318,9 @@ def main():
         ath_v = d.get("ath_52w", 0)
         if ath_v and ath_v > 0 and d["precio"] > 0:
             dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
-            if dist_ath_pct < 25.0:   # incluye negativo (en ATH o por encima)
+            if dist_ath_pct < 20.0:   # incluye negativo (en ATH o por encima)
                 print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% del maximo 52s "
-                      f"({ath_v:.2f}) — necesita >=25% de espacio")
+                      f"({ath_v:.2f}) — necesita >=20% de espacio")
                 razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
                 continue
 
@@ -1422,7 +1429,7 @@ def main():
             f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()} · {zona_txt}\n\n"
             f"✅ Sirio activo · primer escaneo del día\n"
-            f"⚙️ ~490 tickers · score ≥65 · ATH ≥25% · fan 4/4\n"
+            f"⚙️ ~490 tickers · score ≥65 · ATH ≥20% · fan 3-4/4\n"
             f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
             f"<i>Señal nueva → aviso inmediato.</i>\n"
             f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"

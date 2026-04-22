@@ -57,13 +57,10 @@ jobs:
   # ══════════════════════════════════════════════════════════════
   escanear:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -72,7 +69,7 @@ jobs:
         run: echo "hoy=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
 
       - name: Restaurar estado del dia
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v4
         with:
           path: /tmp/sirio_alertas_hoy.json
           key: sirio-v7-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
@@ -114,7 +111,7 @@ jobs:
         run: python scanner_bot_v7.py
 
       - name: Subir backtest y diario
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sirio-datos-${{ steps.fecha.outputs.hoy }}-run${{ github.run_number }}

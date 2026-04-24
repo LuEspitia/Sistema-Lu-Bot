@@ -685,8 +685,12 @@ def obtener_datos(ticker):
 
 def analizar(d):
     p=d["precio"]; s8,s20,s50,s200=d["sma8"],d["sma20"],d["sma50"],d["sma200"]
-    c1=bool(p>s8) if s8 else False; c2=bool(s8>s20) if s20 else False
-    c3=bool(s20>s50) if s50 else False; c4=bool(s50>s200) if s200 else False
+    # Fan redefinido — SMAs clave: 200, 50, 20 (jerarquía de mayor a menor timeframe)
+    # c1: Paso 1 del sistema — precio debe estar SOBRE SMA200
+    c1=bool(p>s200) if s200 else False        # Precio > SMA200 (PASO 1 — veto si falla)
+    c2=bool(s50>s200) if s50 and s200 else False  # SMA50 > SMA200 (tendencia estructural)
+    c3=bool(s20>s50) if s20 and s50 else False    # SMA20 > SMA50  (impulso medio)
+    c4=bool(p>s20) if s20 else False              # Precio > SMA20  (momentum inmediato)
     fan=sum([c1,c2,c3,c4]); en_rango=CONFIG["price_min"]<=p<=CONFIG["price_max"]
     vol_r=d["vol_r"]; vol_ok=d["vh"]>=CONFIG["min_volume_abs"]
     tardia=bool(s8 and p>s8*1.02)
@@ -808,7 +812,7 @@ def analizar_ia(d, a, pos, sentiment_score, tendencia_semanal, noticias_yahoo=No
             f"Analiza {d['ticker']} ({d.get('nombre','')}) para swing trading 5-10 días.\n\n"
             f"TÉCNICOS DIARIOS:\n"
             f"Precio: {d['precio']:.2f} USD ({d['pct']:+.2f}%) | Fan SMA: {a['fan']}/4\n"
-            f"MACD: {d['macd_e']} | RSI: {rsi_v:.0f} | ADX: {d['adx_e']} ({d['adx']:.0f})\n"
+            f"MACD: {d['macd_e']} | RSI: {rsi_v:.0f} | ADX: {d['adx_e']} ({(d['adx'] or 0):.0f})\n"
             f"ATR: {atr_pct}% | Volumen: {a['vol_r']:.1f}x prom.20d\n"
             f"Score Sistema Sirio: {a['score']}/100\n"
             f"Vela: {d.get('vela_patron','sin patrón')} (fuerza {d.get('vela_fuerza',0)}%)\n"
@@ -910,10 +914,10 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     acc = pos["acc"]
     s25 = max(1,round(acc*0.25)); s30=max(1,round(acc*0.30))
     s20x= max(1,round(acc*0.20)); s25b=max(0,acc-s25-s30-s20x)
-    ath   = d.get("ath_52w",0)
-    ath_h = d.get("ath_hist",0)
+    ath   = d.get("ath_52w", 0) or 0
+    ath_h = d.get("ath_hist", 0) or 0
     dist_ath = (f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
-                if ath>d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
+                if ath > d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
     if ath_h and ath_h > ath:
         dist_ath += f" | Hist: {ath_h:.2f} (-{((ath_h-d['precio'])/ath_h*100):.1f}%)"
     etf_ref  = get_sector_etf(d.get("sector","N/A"))
@@ -963,11 +967,11 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"💲 {d['precio']:.2f} USD  ({d['pct']:+.1f}%){tardia_v}\n"
         f"🏔 {dist_ath}\n\n"
 
-        f"<b>📊 Abanico SMA OK 4/4</b>\n"
-        f"{'✅' if a['c1'] else '❌'} Precio &gt; SMA8    {d['sma8']:.2f}\n"
-        f"{'✅' if a['c2'] else '❌'} SMA8   &gt; SMA20   {d['sma20']:.2f}\n"
-        f"{'✅' if a['c3'] else '❌'} SMA20  &gt; SMA50   {d['sma50']:.2f}\n"
-        f"{'✅' if a['c4'] else '❌'} SMA50  &gt; SMA200  {d['sma200']:.2f}\n\n"
+        f"<b>📊 Abanico SMA {a['fan']}/4</b>\n"
+        f"{'✅' if a['c1'] else '❌'} Precio &gt; SMA200  {d['sma200']:.2f}\n"
+        f"{'✅' if a['c2'] else '❌'} SMA50  &gt; SMA200  {d['sma50']:.2f}\n"
+        f"{'✅' if a['c3'] else '❌'} SMA20  &gt; SMA50   {d['sma20']:.2f}\n"
+        f"{'✅' if a['c4'] else '❌'} Precio &gt; SMA20   {d['sma20']:.2f}\n\n"
 
         f"<b>📏 Indicadores</b>\n"
         f"{macd_ico} MACD: {d['macd_e']}\n"
@@ -1115,7 +1119,8 @@ def verificar_señal_activa(ticker):
         sma8v   = sma(c, 8);  sma20v = sma(c, 20)
         sma50v  = sma(c, 50); sma200v= sma(c, 200)
         if not all([sma8v, sma20v, sma50v, sma200v]): return None
-        fan     = sum([precio>sma8v, sma8v>sma20v, sma20v>sma50v, sma50v>sma200v])
+        # Fan consistente con analizar() — SMAs clave: 200, 50, 20
+        fan     = sum([precio>sma200v, sma50v>sma200v, sma20v>sma50v, precio>sma20v])
         pct_s8  = (precio-sma8v)/sma8v*100
         rsi_v   = calc_rsi(c)
         _,_,_,macd_e = calc_macd(c)
@@ -1267,6 +1272,12 @@ def main():
         print(f"{d['precio']:.2f} RSI:{rsi_s} MACD:{d['macd_e']} [{d.get('sector','?')[:10]}]")
         a = analizar(d)
 
+        # ── PASO 1 OBLIGATORIO: precio SOBRE SMA200 — veto absoluto ──────
+        # Regla Lu: sin esta condición NO hay entrada. Gate previo a cualquier score.
+        if d.get("sma200") and d["precio"] < d["sma200"]:
+            print(f"    skip: precio {d['precio']:.2f} < SMA200 {d['sma200']:.2f} — Paso 1 violado")
+            razones["sma200"] = razones.get("sma200", 0) + 1; continue
+
         # ── Filtros técnicos ──
         # FIX v7.1: Fan 3/4 permitido como señal OBSERVAR si score >= 70.
         # Fan 4/4 sigue siendo requerido para señal ENTRAR (estandar).
@@ -1374,7 +1385,7 @@ def main():
         elif es_fan3:
             # Fan 3/4: señal OBSERVAR — misma estructura pero con aviso claro
             msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
-            aviso = "\U0001f52d <b>[OBSERVAR \u2014 Fan 3/4]</b> Falta confirmar 1 SMA. Esperar cierre vela.\n\n"
+            aviso = "\U0001f52d <b>[OBSERVAR \u2014 Fan 3/4]</b> Estructura incompleta. Esperar cierre vela y confirmar SMA faltante.\n\n"
             msg = aviso + msg
         else:
             msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
@@ -1429,7 +1440,7 @@ def main():
             f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()} · {zona_txt}\n\n"
             f"✅ Sirio activo · primer escaneo del día\n"
-            f"⚙️ ~490 tickers · score ≥65 · ATH ≥20% · fan 3-4/4\n"
+            f"⚙️ ~490 tickers · score ≥65 · ATH ≥20% · precio>SMA200 · fan 3-4/4\n"
             f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
             f"<i>Señal nueva → aviso inmediato.</i>\n"
             f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"
@@ -1458,7 +1469,7 @@ def main():
     debe_status     = (nuevas == 0) and ((mins_silencio >= 60) or es_ultimo_scan or safety_net)
 
     if debe_status:
-        mapa = {"fan":"Fan 4/4","score":"Score<65","earnings":"Earnings",
+        mapa = {"fan":"Fan 4/4","sma200":"Precio<SMA200","score":"Score<65","earnings":"Earnings",
                 "semanal":"Semanal baj.","tardia":"Tardía","error":"Error datos",
                 "cerca_ath":"ATH<25%","extendida":">2%SMA8",
                 "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80"}
@@ -1504,4 +1515,3 @@ if __name__ == "__main__":
             )
         except Exception:
             pass
-        raise

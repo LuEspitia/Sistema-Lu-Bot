@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 # ═══════════════════════════════════════════════════════════════
-#  Solares — Sistema Sirio Bot  v6.0  (DEFINITIVO)
+#  Solares — Sistema Sirio Bot  v7.3
 #  Trader : Lu Espitia  |  Solares Trading
+#  Cambios v7.3: RSI 40-58 | capital 20275 | riesgo $100
+#                ATR≥$1 | Beta≥1 | fan 2/3 mín | SMA50
+#                vela_señal Oliver Velez (RBI, GIFT, Hammer, Engulfing)
+#                SMAs clasificadas (Trampolín / Tendencia / Comprimida)
 # ═══════════════════════════════════════════════════════════════
 import yfinance as yf
 import pandas as pd
@@ -55,21 +59,21 @@ def es_dia_festivo_nyse():
     return (nombre is not None, nombre or "")
 
 CONFIG = {
-    "capital_usd":         33140,
-    "riesgo_fijo_usd":     150,
+    "capital_usd":         20275,   # v7.3 — solo cuenta day/swing
+    "riesgo_fijo_usd":     100,     # v7.3 — corregido desde 150
     "stop_loss_pct":       6.0,
     "price_min":           10.0,
     "price_max":           150.0,
-    "rsi_min":             45,
-    "rsi_max":             72,
+    "rsi_min":             40,      # v7.3 — entrar antes del impulso
+    "rsi_max":             58,      # v7.3 — no perseguir el movimiento
     "min_volume_abs":      500_000,
-    "min_fan_to_alert":    4,
-    "score_minimo":        65,    # 65/100 acordado originalmente
+    "min_fan_to_alert":    2,       # v7.3 — fan 2/3 mínimo aceptable
+    "score_minimo":        65,
     "earnings_dias_min":   5,
-    "max_tickers_scan":    500,  # ahora tenemos universo grande
-    # Sin límite de señales — el bot informa, Lu decide
-    # El score compuesto (fan+RSI+ADX+vol+vela) ya filtra lo irrelevante
+    "max_tickers_scan":    500,
     "max_alertas_dia":     99,
+    "atr_min_usd":         1.0,     # v7.3 — NUEVO: ATR diario mín $1
+    "beta_min":            1.0,     # v7.3 — NUEVO: Beta mínimo 1.0
     # Resumen de vela 4H — 15 min antes del cierre de cada vela
     # Vela 1: 9:30am-1:30pm ET → resumen 1:15pm ET
     # Vela 2: 1:30pm-4:00pm ET → resumen 3:45pm ET
@@ -573,33 +577,90 @@ def proyectar_volumen(vh,vp):
         return (vh/vp if vp>0 else 0),vh
 
 def detectar_velas(hist):
+    """
+    Detección de velas — Sistema Sirio v7.3
+    Formaciones Oliver Velez: RBI (Rally Base Impulse) y GIFT (Gap Impulse For Trade)
+    + formaciones clásicas: Hammer, Engulfing, Morning Star, Pin Bar, Piercing Line
+    IMPORTANTE: SIEMPRE usar vela CERRADA. El bot corre en horario de cierre.
+    """
     try:
-        if len(hist)<3: return "Sin datos suficientes",0
+        if len(hist)<4: return "Sin datos suficientes",0
         o=hist["Open"].values; h=hist["High"].values
         c=hist["Close"].values; l=hist["Low"].values
-        o1,h1,c1,l1=o[-1],h[-1],c[-1],l[-1]
-        o2,h2,c2,l2=o[-2],h[-2],c[-2],l[-2]
-        o3,h3,c3,l3=o[-3],h[-3],c[-3],l[-3]
-        cuerpo1=abs(c1-o1); rango1=h1-l1 if h1-l1>0 else 0.0001
-        mecha_inf=min(o1,c1)-l1; mecha_sup=h1-max(o1,c1)
-        cuerpo2=abs(c2-o2); alcista1=c1>o1; bajista2=c2<o2
-        if mecha_inf>=2*cuerpo1 and mecha_sup<=cuerpo1*0.5 and cuerpo1>=rango1*0.15:
-            return "🔨 Hammer (Martillo) — confirmación fuerte en soporte",90
-        if alcista1 and bajista2 and o1<=c2 and c1>=o2 and cuerpo1>cuerpo2:
-            return "🟢 Bullish Engulfing — señal de compra fuerte",85
-        if c3<o3 and abs(c2-o2)<abs(c3-o3)*0.4 and c1>o1 and c1>(o3+c3)/2:
-            return "⭐ Morning Star — reversión de 3 velas",85
-        if alcista1 and bajista2 and o1<l2 and c1>(o2+c2)/2 and c1<o2:
-            return "📈 Piercing Line — rebote alcista moderado",70
-        if cuerpo1<=rango1*0.1 and bajista2 and c2<c3:
-            return "⚖️ Doji en soporte — esperar confirmación mañana",55
-        if alcista1 and cuerpo1>=rango1*0.6 and mecha_inf<=cuerpo1*0.3:
-            return "💚 Vela verde fuerte — momentum alcista",65
-        if cuerpo1<=rango1*0.1:
-            return "↔️ Doji neutro — mercado indeciso",30
-        return "Vela sin patrón específico",40
-    except:
-        return "Error calculando velas",0
+        o1,h1,c1,l1 = o[-1],h[-1],c[-1],l[-1]   # vela más reciente CERRADA
+        o2,h2,c2,l2 = o[-2],h[-2],c[-2],l[-2]   # vela anterior
+        o3,h3,c3,l3 = o[-3],h[-3],c[-3],l[-3]   # 2 velas atrás
+        o4,h4,c4,l4 = o[-4],h[-4],c[-4],l[-4]   # 3 velas atrás
+
+        cuerpo1   = abs(c1-o1)
+        rango1    = h1-l1 if h1-l1>0 else 0.0001
+        mecha_inf = min(o1,c1)-l1
+        mecha_sup = h1-max(o1,c1)
+        cuerpo2   = abs(c2-o2)
+        cuerpo3   = abs(c3-o3)
+        rango2    = h2-l2 if h2-l2>0 else 0.0001
+        alcista1  = c1>o1; bajista1 = c1<o1
+        alcista2  = c2>o2; bajista2 = c2<o2
+        alcista3  = c3>o3
+
+        # ── OLIVER VELEZ — RBI (Rally · Base · Impulse) ─────────────────────
+        # Patrón de 3 velas: Rally (vela alcista fuerte) → Base (vela pequeña/doji
+        # dentro del rango del rally) → Impulse (ruptura alcista del rally)
+        # La Base es la zona de acumulación — el precio "descansa" antes de continuar.
+        # En Oliver Velez: la Base puede ser 1-3 velas. Aquí usamos el caso de 1 Base.
+        # Estructura: o4/c4 grande alcista → o3/c3 pequeña (≤40% del rally) → o1/c1 rompe
+        rally_grande  = alcista3 and cuerpo3 >= rango2*0.5
+        base_pequeña  = cuerpo2  <= cuerpo3*0.40  # Base ≤ 40% del rally previo
+        impulso_arriba= alcista1 and c1>h3        # Rompe sobre el máximo del rally
+        if rally_grande and base_pequeña and impulso_arriba:
+            return "⚡ RBI (Rally·Base·Impulse) [Oliver Velez] — setup de máxima prioridad",95
+
+        # ── OLIVER VELEZ — GIFT (Gap + Impulse For Trade) ───────────────────
+        # Gap alcista de apertura + vela alcista fuerte = señal de entrada en la dirección
+        # del gap. La vela GIFT es la confirmación de que el gap no se cerró.
+        # Condiciones: gap alcista (o1 > c2) + cierre fuerte (c1 > o1 * 1.01)
+        gap_alcista   = o1 > c2   # abre sobre el cierre anterior
+        cuerpo_fuerte = alcista1 and cuerpo1 >= rango1*0.5
+        if gap_alcista and cuerpo_fuerte:
+            return "🎁 GIFT (Gap Impulse For Trade) [Oliver Velez] — gap alcista confirmado",92
+
+        # ── CLÁSICAS — Hammer / Pin Bar alcista ─────────────────────────────
+        # Mecha inferior larga (≥ 2× cuerpo), cuerpo pequeño arriba, poca mecha superior
+        if (mecha_inf >= 2*cuerpo1 and mecha_sup <= cuerpo1*0.5
+                and cuerpo1 >= rango1*0.15 and alcista1):
+            return "🔨 Hammer (Martillo) — soporte fuerte con rechazo",90
+
+        # Pin Bar alcista: mecha inferior ≥ 60% del rango total
+        if mecha_inf >= rango1*0.60 and alcista1:
+            return "📌 Pin Bar alcista — rechazo de zona de venta, comprador mandando",88
+
+        # ── CLÁSICAS — Bullish Engulfing ─────────────────────────────────────
+        # Vela alcista grande que envuelve completamente la vela roja anterior
+        if (alcista1 and bajista2 and o1<=c2 and c1>=o2 and cuerpo1>cuerpo2):
+            return "🟢 Bullish Engulfing — absorción total de vendedores",85
+
+        # ── CLÁSICAS — Morning Star (3 velas) ───────────────────────────────
+        # Vela roja grande → doji/vela pequeña → vela verde que recupera >50% de la roja
+        doji_medio   = abs(c3-o3)<abs(c4-o4)*0.4 if len(c)>=5 else cuerpo2<cuerpo3*0.4
+        if (bajista2 and doji_medio and alcista1 and c1>(o2+c2)/2):
+            return "⭐ Morning Star — reversión de 3 velas confirmada",85
+
+        # ── CLÁSICAS — Piercing Line ─────────────────────────────────────────
+        # Vela verde que abre bajo el mínimo anterior y cierra sobre la mitad de la roja
+        if (alcista1 and bajista2 and o1<l2 and c1>(o2+c2)/2 and c1<o2):
+            return "📈 Piercing Line — rebote alcista, cierra sobre 50% de la roja",72
+
+        # ── DOJI EN SOPORTE (potencial señal) ───────────────────────────────
+        if cuerpo1 <= rango1*0.10 and bajista2 and c2<c3:
+            return "⚖️ Doji en soporte — esperar vela de confirmación mañana",50
+
+        # ── VELA VERDE FUERTE (confirmación de momentum) ─────────────────────
+        if alcista1 and cuerpo1 >= rango1*0.60 and mecha_inf <= cuerpo1*0.30:
+            return "💚 Vela verde fuerte — momentum alcista, entrada válida",68
+
+        return "Vela sin patrón específico — esperar formación",38
+    except Exception as ex:
+        return f"Error calculando velas: {str(ex)[:30]}",0
 
 def check_earnings_proximos(ticker):
     try:
@@ -683,37 +744,83 @@ def obtener_datos(ticker):
     except Exception as ex:
         return {"ticker":ticker,"error":str(ex)}
 
+def clasificar_smas(s20, s50, s200, atr):
+    """
+    v7.3 — Clasificación de SMAs en lugar de exclusión.
+    Las SMAs juntas NO se excluyen: son oportunidades tipo TRAMPOLÍN.
+    Las SMAs separadas con espacio SON tendencia lucrativa.
+    La información se pasa al mensaje de Telegram para que Lu decida.
+    """
+    if not all([s20, s50, s200, atr]) or atr <= 0:
+        return "SIN_DATOS", "📊 SMA: sin datos suficientes"
+    dist_20_50  = abs(s20 - s50)
+    dist_50_200 = abs(s50 - s200)
+    espacio_atr = dist_20_50 / atr  # cuántos ATR de distancia entre SMA20 y SMA50
+
+    if espacio_atr >= 3.0 and s20 > s50 > s200:
+        return "TENDENCIA", f"🚀 SMA TENDENCIA — espacio {espacio_atr:.1f}×ATR (> 3×) — runway amplio, momentum establecido"
+    elif espacio_atr >= 1.5 and s20 > s50 > s200:
+        return "ESPACIO_NORMAL", f"✅ SMA ESPACIO NORMAL — {espacio_atr:.1f}×ATR — setup estándar"
+    elif espacio_atr < 1.5 and s20 > s50:
+        return "TRAMPOLIN", f"🪜 SMA TRAMPOLÍN — {espacio_atr:.1f}×ATR (comprimidas) — posible catapulta si hay vela señal fuerte"
+    elif espacio_atr < 1.5 and s20 <= s50:
+        return "COMPRIMIDA_BAJISTA", f"⚠️ SMA COMPRIMIDAS BAJISTAS — {espacio_atr:.1f}×ATR — cautela, posible inicio de distribución"
+    else:
+        return "MIXTA", f"🔵 SMA MIXTA — {espacio_atr:.1f}×ATR — contexto no determinante"
+
 def analizar(d):
+    """
+    v7.3 — Filtros actualizados:
+    RSI zona óptima ahora 40-58 (entrar antes del impulso).
+    Fan mínimo 2/3. ATR ≥ $1. Beta ≥ 1.
+    SMAs: clasificadas (Trampolín / Tendencia / Comprimidas), NO excluidas.
+    """
     p=d["precio"]; s8,s20,s50,s200=d["sma8"],d["sma20"],d["sma50"],d["sma200"]
-    # Fan redefinido — SMAs clave: 200, 50, 20 (jerarquía de mayor a menor timeframe)
-    # c1: Paso 1 del sistema — precio debe estar SOBRE SMA200
-    c1=bool(p>s200) if s200 else False        # Precio > SMA200 (PASO 1 — veto si falla)
-    c2=bool(s50>s200) if s50 and s200 else False  # SMA50 > SMA200 (tendencia estructural)
-    c3=bool(s20>s50) if s20 and s50 else False    # SMA20 > SMA50  (impulso medio)
-    c4=bool(p>s20) if s20 else False              # Precio > SMA20  (momentum inmediato)
+    atr_v = d.get("atr") or 0
+
+    # Fan — SMAs ordenadas: SMA200 es el macro, SMA50 el medio, SMA20 el momentum
+    c1=bool(p>s200)    if s200             else False  # Paso 1 — veto absoluto
+    c2=bool(s50>s200)  if s50 and s200     else False  # SMA50 > SMA200 — estructura
+    c3=bool(s20>s50)   if s20 and s50      else False  # SMA20 > SMA50  — impulso
+    c4=bool(p>s20)     if s20              else False  # Precio > SMA20 — momentum
+
     fan=sum([c1,c2,c3,c4]); en_rango=CONFIG["price_min"]<=p<=CONFIG["price_max"]
     vol_r=d["vol_r"]; vol_ok=d["vh"]>=CONFIG["min_volume_abs"]
     tardia=bool(s8 and p>s8*1.02)
     rsi_v=d["rsi"] if d["rsi"] else 0; adx_v=d["adx"] if d["adx"] else 0
-    pts_fan = fan*10
-    # RSI óptimo 50-65. Penalización clara por sobrecomprado (>70)
-    if 55<=rsi_v<=65:     pts_rsi = 15
-    elif 50<=rsi_v<70:    pts_rsi = 8
-    elif 45<=rsi_v<50:    pts_rsi = 4
-    elif rsi_v>=70:       pts_rsi = 0   # sobrecomprado — sin puntos
-    else:                 pts_rsi = 0   # débil
+
+    # ── Clasificación SMA — NO exclusión (v7.3) ──────────────────────────────
+    sma_tipo, sma_label = clasificar_smas(s20, s50, s200, atr_v)
+
+    # ── Scoring ──────────────────────────────────────────────────────────────
+    pts_fan = fan * 10  # max 40
+
+    # RSI v7.3: zona óptima 40-55. >58 = sobrecomprado para Sirio.
+    if 45<=rsi_v<=55:     pts_rsi = 15  # zona perfecta — precio acaba de recuperar
+    elif 40<=rsi_v<45:    pts_rsi = 10  # recuperando — válido, menos ideal
+    elif 55<rsi_v<=58:    pts_rsi = 8   # válido pero en el límite superior
+    elif rsi_v<40:        pts_rsi = 0   # demasiado débil aún
+    else:                 pts_rsi = 0   # >58 — sobrecomprado para sistema Sirio
+
+    # Bonus SMA: Trampolín puntúa diferente a Tendencia
+    pts_sma_bonus = 0
+    if sma_tipo == "TENDENCIA":          pts_sma_bonus = 10  # runway amplio
+    elif sma_tipo == "ESPACIO_NORMAL":   pts_sma_bonus = 6
+    elif sma_tipo == "TRAMPOLIN":        pts_sma_bonus = 8   # alta potencial si vela fuerte
+
     pts_adx=(15 if adx_v>=30 else 12 if adx_v>=25 else 8 if adx_v>=20 else 0)
-    # Volumen: 0.6x = 0 puntos. Necesita al menos 0.8x para sumar.
     if vol_r>=2.0:        pts_vol = 15
     elif vol_r>=1.5:      pts_vol = 12
     elif vol_r>=1.0:      pts_vol = 8
     elif vol_r>=0.8:      pts_vol = 4
-    else:                 pts_vol = 0   # vol bajo — sin puntos
+    else:                 pts_vol = 0
     pts_vela=int(d.get("vela_fuerza",0)*0.15)
-    score=min(100,pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela)
+    score=min(100, pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela+pts_sma_bonus)
     return {"fan":fan,"c1":c1,"c2":c2,"c3":c3,"c4":c4,
             "en_rango":en_rango,"vol_r":vol_r,"vol_ok":vol_ok,"senal_tardia":tardia,
-            "score":score,"score_det":f"Fan:{pts_fan}+RSI:{pts_rsi}+ADX:{pts_adx}+Vol:{pts_vol}+Vela:{pts_vela}"}
+            "sma_tipo":sma_tipo,"sma_label":sma_label,
+            "score":score,
+            "score_det":f"Fan:{pts_fan}+RSI:{pts_rsi}+SMA:{pts_sma_bonus}+ADX:{pts_adx}+Vol:{pts_vol}+Vela:{pts_vela}"}
 
 def posicion(precio, ath_52w=None, atr=None, beta=None):
     """
@@ -907,7 +1014,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     atr_v  = d["atr"] if d["atr"] else 0
     atr_pct= round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
     rsi_tag= ("débil" if rsi_v<CONFIG["rsi_min"]
-              else "sobrecomprado" if rsi_v>CONFIG["rsi_max"] else "OK")
+              else "sobrecomprado — fuera rango Sirio" if rsi_v>CONFIG["rsi_max"] else "OK ✓")
     vol_r   = a["vol_r"]
     tardia_v = "\n⚠️ precio extendido &gt;2% sobre SMA8" if a.get("senal_tardia") else ""
     p1,p2,p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, vol_r)
@@ -935,10 +1042,11 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     # MACD
     macd_ico = "🟢" if "Bull" in d["macd_e"] else "🔴"
 
-    # RSI — zona óptima 50-65
-    if 50 <= rsi_v <= 65:    rsi_ico = "🟢"
-    elif 45 <= rsi_v <= 72:  rsi_ico = "🟡"
-    else:                     rsi_ico = "🔴"
+    # RSI — zona óptima 40-58 (v7.3)
+    if 45 <= rsi_v <= 55:    rsi_ico = "🟢"  # zona perfecta
+    elif 40 <= rsi_v < 45:   rsi_ico = "🟡"  # recuperando
+    elif 55 < rsi_v <= 58:   rsi_ico = "🟡"  # limite superior
+    else:                     rsi_ico = "🔴"  # fuera de rango
 
     # ADX — fuerza de tendencia
     adx_v = d["adx"] if d["adx"] else 0
@@ -971,7 +1079,8 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"{'✅' if a['c1'] else '❌'} Precio &gt; SMA200  {d['sma200']:.2f}\n"
         f"{'✅' if a['c2'] else '❌'} SMA50  &gt; SMA200  {d['sma50']:.2f}\n"
         f"{'✅' if a['c3'] else '❌'} SMA20  &gt; SMA50   {d['sma20']:.2f}\n"
-        f"{'✅' if a['c4'] else '❌'} Precio &gt; SMA20   {d['sma20']:.2f}\n\n"
+        f"{'✅' if a['c4'] else '❌'} Precio &gt; SMA20   {d['sma20']:.2f}\n"
+        f"{a.get('sma_label','📊 SMA: sin clasificar')}\n\n"
 
         f"<b>📏 Indicadores</b>\n"
         f"{macd_ico} MACD: {d['macd_e']}\n"
@@ -1278,25 +1387,41 @@ def main():
             print(f"    skip: precio {d['precio']:.2f} < SMA200 {d['sma200']:.2f} — Paso 1 violado")
             razones["sma200"] = razones.get("sma200", 0) + 1; continue
 
-        # ── Filtros técnicos ──
-        # FIX v7.1: Fan 3/4 permitido como señal OBSERVAR si score >= 70.
-        # Fan 4/4 sigue siendo requerido para señal ENTRAR (estandar).
-        # En mercados laterales/volatiles (VIX > 18), Fan 4/4 es muy poco frecuente.
-        fan_minimo_observar = 3
+        # ── Filtros técnicos v7.3 ──────────────────────────────────────────────
+        # Fan mínimo: 2/4. Fan 2 = SMA200 OK + SMA50>SMA200.
+        # La clasificación SMA (Trampolín/Tendencia) ya está en analizar().
+        fan_minimo_observar = CONFIG["min_fan_to_alert"]  # = 2
         if a["fan"] < fan_minimo_observar or not a["en_rango"] or not a["vol_ok"]:
             razones["fan"] = razones.get("fan", 0) + 1; continue
-        # Fan 3/4: requiere score mas alto para compensar el fan incompleto
-        es_fan3 = (a["fan"] == 3)
-        score_minimo_efectivo = 65 if es_fan3 else CONFIG["score_minimo"]
+        es_fan2 = (a["fan"] == 2); es_fan3 = (a["fan"] == 3)
+        # Fan 2: necesita score más alto y vela señal fuerte para compensar
+        score_minimo_efectivo = (72 if es_fan2 else 68 if es_fan3 else CONFIG["score_minimo"])
+
+        # ── FILTRO ATR MÍNIMO $1 (v7.3) ───────────────────────────────────────
+        atr_check = d.get("atr", 0) or 0
+        if atr_check < CONFIG.get("atr_min_usd", 1.0):
+            print(f"    skip: ATR ${atr_check:.2f} < $1.00 — poco rango diario para swing")
+            razones["atr_bajo"] = razones.get("atr_bajo", 0) + 1; continue
+
+        # ── FILTRO BETA MÍNIMO 1.0 (v7.3) ─────────────────────────────────────
+        beta_check = d.get("beta", 0) or 0
+        if 0 < beta_check < CONFIG.get("beta_min", 1.0):
+            print(f"    skip: Beta {beta_check:.2f} < 1.0 — se mueve menos que el mercado")
+            razones["beta_bajo"] = razones.get("beta_bajo", 0) + 1; continue
         # Volumen ratio mínimo 0.7x
         if a["vol_r"] < 0.7:
             print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
             razones["vol_bajo"] = razones.get("vol_bajo", 0) + 1; continue
-        # RSI sobrecomprado extremo
+        # ── FILTRO RSI 40-58 (v7.3) ────────────────────────────────────────────
+        # Entrar cuando el precio acaba de recuperar, no cuando ya corrió.
+        # RSI < 40: mercado aún débil, esperar. RSI > 58: ya corrió mucho.
         rsi_v_check = d.get("rsi", 0) or 0
-        if rsi_v_check > 80:
-            print(f"    skip: RSI {rsi_v_check:.0f} > 80 sobrecomprado extremo")
-            razones["rsi_extremo"] = razones.get("rsi_extremo", 0) + 1; continue
+        if rsi_v_check > CONFIG["rsi_max"]:  # > 58
+            print(f"    skip: RSI {rsi_v_check:.0f} > {CONFIG['rsi_max']} — sobrecomprado para Sirio v7.3")
+            razones["rsi_alto"] = razones.get("rsi_alto", 0) + 1; continue
+        if rsi_v_check > 0 and rsi_v_check < CONFIG["rsi_min"]:  # < 40
+            print(f"    skip: RSI {rsi_v_check:.0f} < {CONFIG['rsi_min']} — precio aún débil")
+            razones["rsi_bajo"] = razones.get("rsi_bajo", 0) + 1; continue
         # ETFs de renta fija
         nombre_check = d.get("nombre","").lower()
         if d.get("sector","") in ("","N/A") and any(w in nombre_check for w in
@@ -1469,7 +1594,8 @@ def main():
     debe_status     = (nuevas == 0) and ((mins_silencio >= 60) or es_ultimo_scan or safety_net)
 
     if debe_status:
-        mapa = {"fan":"Fan 4/4","sma200":"Precio<SMA200","score":"Score<65","earnings":"Earnings",
+        mapa = {"fan":f"Fan<{CONFIG['min_fan_to_alert']}/4","sma200":"Precio<SMA200","score":"Score<65","earnings":"Earnings",
+                "atr_bajo":"ATR<$1","beta_bajo":"Beta<1","rsi_alto":f"RSI>{CONFIG['rsi_max']}","rsi_bajo":f"RSI<{CONFIG['rsi_min']}",
                 "semanal":"Semanal baj.","tardia":"Tardía","error":"Error datos",
                 "cerca_ath":"ATH<25%","extendida":">2%SMA8",
                 "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80"}

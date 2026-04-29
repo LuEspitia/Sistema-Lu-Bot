@@ -73,10 +73,12 @@ jobs:
       - name: Restaurar estado del dia
         uses: actions/cache@v4
         with:
-          path: /tmp/sirio_alertas_hoy.json
-          key: sirio-v7-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
+          path: |
+            /tmp/sirio_alertas_hoy.json
+            /tmp/sirio_zombie_tracker.json
+          key: sirio-v8-${{ steps.fecha.outputs.hoy }}-${{ github.run_number }}
           restore-keys: |
-            sirio-v7-${{ steps.fecha.outputs.hoy }}-
+            sirio-v8-${{ steps.fecha.outputs.hoy }}-
 
       - name: Verificar estado restaurado
         run: |
@@ -94,6 +96,9 @@ jobs:
           else
             echo "Sin estado previo — dia limpio"
           fi
+          if [ -f /tmp/sirio_zombie_tracker.json ]; then
+            echo "Zombie tracker presente — persistiendo entre runs"
+          fi
 
       - name: Instalar librerias
         run: |
@@ -110,7 +115,7 @@ jobs:
           REDDIT_USERNAME:       ${{ secrets.REDDIT_USERNAME }}
           REDDIT_PASSWORD:       ${{ secrets.REDDIT_PASSWORD }}
           STOCKTWITS_TOKEN:      ${{ secrets.STOCKTWITS_TOKEN }}
-        run: python scanner_bot_v7.py
+        run: python scanner_bot_v8.py
 
       - name: Subir backtest y diario
         uses: actions/upload-artifact@v4

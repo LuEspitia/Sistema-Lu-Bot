@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 # ═══════════════════════════════════════════════════════════════
-#  Solares — Sistema Sirio Bot  v8.0
+#  Solares — Sistema Sirio Bot  v7.2
 #  Trader : Lu Espitia  |  Solares Trading
-#  Cambios v8.0: Filtros simplificados — 5 obligatorios (precio>SMA200,
-#                SMA20 pendiente alcista, vol>500K, ATR>$1, Beta>1)
-#                Stop = low de vela confirmación (no ATR fijo)
-#                Salidas: 15%@1.5R | 50%@2.5R | 35% trailing SMA20
-#                Stop mgmt: BE tras T1 | +0.3R/+0.5R tras T2
-#                Zona entrada: pullback SMA20 (max +5%, min -2%)
-#                Filtro zombie (3 scans sin vela → silencio 5d)
-#                ETFs commodities excluidos del scan
+#
+#  MEJORAS v7.2 (Price Action upgrade):
+#  + clasificar_entorno()      — Momentum / MeanReversion / Chop
+#  + detectar_estructura_hh_hl() — Estructura HH/HL (Murphy)
+#  + detectar_gap()            — Linda Raschke: gaps → continuación
+#  + clasificar_vela_4h()      — Fase 4H en re-verificación (L2WTrades)
+#  + Score normalizado a 100 con nuevos componentes
 # ═══════════════════════════════════════════════════════════════
 import yfinance as yf
 import pandas as pd
@@ -63,35 +62,21 @@ def es_dia_festivo_nyse():
     return (nombre is not None, nombre or "")
 
 CONFIG = {
-    "capital_usd":         20275,   # v7.3 — solo cuenta day/swing
-    "riesgo_fijo_usd":     100,     # v7.3 — corregido desde 150
+    "capital_usd":         33140,
+    "riesgo_fijo_usd":     150,
     "stop_loss_pct":       6.0,
     "price_min":           10.0,
     "price_max":           150.0,
-    "rsi_min":             35,      # v8 — más flexible, filtro de vela hace el trabajo
-    "rsi_max":             65,      # v8 — ampliado, la zona de entrada es SMA20 pullback
+    "rsi_min":             45,
+    "rsi_max":             72,
     "min_volume_abs":      500_000,
-    "min_fan_to_alert":    2,       # mantener fan 2/3 mínimo
-    "score_minimo":        58,      # v8 — reducido; filtros concretos reemplazan score alto
+    "min_fan_to_alert":    4,
+    "score_minimo":        65,    # 65/100 acordado originalmente
     "earnings_dias_min":   5,
-    "max_tickers_scan":    500,
+    "max_tickers_scan":    500,  # ahora tenemos universo grande
+    # Sin límite de señales — el bot informa, Lu decide
+    # El score compuesto (fan+RSI+ADX+vol+vela) ya filtra lo irrelevante
     "max_alertas_dia":     99,
-    "atr_min_usd":         1.0,     # v8 — obligatorio: ATR diario ≥ $1
-    "beta_min":            1.0,     # v8 — obligatorio: Beta ≥ 1.0
-    # v8 — Zona de pullback SMA20 (reemplaza zona SMA8)
-    "pullback_sma20_max_pct": 5.0,  # precio max +5% sobre SMA20
-    "pullback_sma20_min_pct": -2.0, # precio puede estar hasta -2% bajo SMA20 (tocando)
-    "sma20_slope_dias":    5,        # días para verificar pendiente SMA20
-    # v8 — Filtro señal zombie (ticker sin vela señal real)
-    "zombie_max_scans":    3,        # 3 scans sin vela confirmación → silenciar
-    "zombie_silencio_dias": 5,       # días de silencio después de zombie
-    "zombie_file":         "/tmp/sirio_zombie_tracker.json",
-    # v8 — ETFs de commodities/volatilidad excluidos del swing scanner
-    "etf_commodities_excluidos": [
-        "COPX","XME","GDX","GDXJ","SIL","URA","REMX",
-        "XLE","OIH","XOP","AMLP","ICLN","TAN","FAN",
-        "VXX","UVXY","SVXY","SOXS","SOXL","TQQQ","SQQQ"
-    ],
     # Resumen de vela 4H — 15 min antes del cierre de cada vela
     # Vela 1: 9:30am-1:30pm ET → resumen 1:15pm ET
     # Vela 2: 1:30pm-4:00pm ET → resumen 3:45pm ET
@@ -143,22 +128,6 @@ def guardar_estado(e):
     try:
         with open(CONFIG["state_file"],"w",encoding="utf-8") as f:
             json.dump(e,f)
-    except:
-        pass
-
-# ── Zombie tracker — persiste entre días ─────────────────────────────────────
-def cargar_zombie():
-    """Estado zombie cross-day: contadores y períodos de silencio por ticker."""
-    try:
-        with open(CONFIG["zombie_file"],"r",encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {"contadores":{}, "silenciados":{}}
-
-def guardar_zombie(z):
-    try:
-        with open(CONFIG["zombie_file"],"w",encoding="utf-8") as f:
-            json.dump(z,f)
     except:
         pass
 
@@ -610,112 +579,172 @@ def proyectar_volumen(vh,vp):
     except:
         return (vh/vp if vp>0 else 0),vh
 
-def sma20_pendiente_alcista(hist, periodos=5):
-    """
-    v8 — Verifica que SMA20 tiene pendiente ALCISTA.
-    Compara SMA20 actual vs SMA20 hace N periodos.
-    Es uno de los 5 filtros obligatorios del sistema.
-    Retorna (bool, float: pendiente_pct)
-    """
-    try:
-        closes = hist["Close"].values.astype(float)
-        if len(closes) < 25:
-            return True, 0.0   # datos insuficientes → no bloquear
-        sma20_hoy = float(np.mean(closes[-20:]))
-        sma20_ant = float(np.mean(closes[-20-periodos:-periodos]))
-        if sma20_ant <= 0:
-            return True, 0.0
-        pendiente_pct = (sma20_hoy - sma20_ant) / sma20_ant * 100
-        return (pendiente_pct >= 0), round(pendiente_pct, 3)
-    except:
-        return True, 0.0
-
 def detectar_velas(hist):
-    """
-    Detección de velas — Sistema Sirio v7.3
-    Formaciones Oliver Velez: RBI (Rally Base Impulse) y GIFT (Gap Impulse For Trade)
-    + formaciones clásicas: Hammer, Engulfing, Morning Star, Pin Bar, Piercing Line
-    IMPORTANTE: SIEMPRE usar vela CERRADA. El bot corre en horario de cierre.
-    """
     try:
-        if len(hist)<4: return "Sin datos suficientes",0,0
+        if len(hist)<3: return "Sin datos suficientes",0
         o=hist["Open"].values; h=hist["High"].values
         c=hist["Close"].values; l=hist["Low"].values
-        o1,h1,c1,l1 = o[-1],h[-1],c[-1],l[-1]   # vela más reciente CERRADA
-        candle_low = float(l1)  # v8 — low de la vela de señal para stop loss
-        o2,h2,c2,l2 = o[-2],h[-2],c[-2],l[-2]   # vela anterior
-        o3,h3,c3,l3 = o[-3],h[-3],c[-3],l[-3]   # 2 velas atrás
-        o4,h4,c4,l4 = o[-4],h[-4],c[-4],l[-4]   # 3 velas atrás
+        o1,h1,c1,l1=o[-1],h[-1],c[-1],l[-1]
+        o2,h2,c2,l2=o[-2],h[-2],c[-2],l[-2]
+        o3,h3,c3,l3=o[-3],h[-3],c[-3],l[-3]
+        cuerpo1=abs(c1-o1); rango1=h1-l1 if h1-l1>0 else 0.0001
+        mecha_inf=min(o1,c1)-l1; mecha_sup=h1-max(o1,c1)
+        cuerpo2=abs(c2-o2); alcista1=c1>o1; bajista2=c2<o2
+        if mecha_inf>=2*cuerpo1 and mecha_sup<=cuerpo1*0.5 and cuerpo1>=rango1*0.15:
+            return "🔨 Hammer (Martillo) — confirmación fuerte en soporte",90
+        if alcista1 and bajista2 and o1<=c2 and c1>=o2 and cuerpo1>cuerpo2:
+            return "🟢 Bullish Engulfing — señal de compra fuerte",85
+        if c3<o3 and abs(c2-o2)<abs(c3-o3)*0.4 and c1>o1 and c1>(o3+c3)/2:
+            return "⭐ Morning Star — reversión de 3 velas",85
+        if alcista1 and bajista2 and o1<l2 and c1>(o2+c2)/2 and c1<o2:
+            return "📈 Piercing Line — rebote alcista moderado",70
+        if cuerpo1<=rango1*0.1 and bajista2 and c2<c3:
+            return "⚖️ Doji en soporte — esperar confirmación mañana",55
+        if alcista1 and cuerpo1>=rango1*0.6 and mecha_inf<=cuerpo1*0.3:
+            return "💚 Vela verde fuerte — momentum alcista",65
+        if cuerpo1<=rango1*0.1:
+            return "↔️ Doji neutro — mercado indeciso",30
+        return "Vela sin patrón específico",40
+    except:
+        return "Error calculando velas",0
 
-        cuerpo1   = abs(c1-o1)
-        rango1    = h1-l1 if h1-l1>0 else 0.0001
-        mecha_inf = min(o1,c1)-l1
-        mecha_sup = h1-max(o1,c1)
-        cuerpo2   = abs(c2-o2)
-        cuerpo3   = abs(c3-o3)
-        rango2    = h2-l2 if h2-l2>0 else 0.0001
-        alcista1  = c1>o1; bajista1 = c1<o1
-        alcista2  = c2>o2; bajista2 = c2<o2
-        alcista3  = c3>o3
+# ─────────────────────────────────────────────────────────────
+#  MEJORAS v7.2 — Price Action & Estructura
+# ─────────────────────────────────────────────────────────────
 
-        # ── OLIVER VELEZ — RBI (Rally · Base · Impulse) ─────────────────────
-        # Patrón de 3 velas: Rally (vela alcista fuerte) → Base (vela pequeña/doji
-        # dentro del rango del rally) → Impulse (ruptura alcista del rally)
-        # La Base es la zona de acumulación — el precio "descansa" antes de continuar.
-        # En Oliver Velez: la Base puede ser 1-3 velas. Aquí usamos el caso de 1 Base.
-        # Estructura: o4/c4 grande alcista → o3/c3 pequeña (≤40% del rally) → o1/c1 rompe
-        rally_grande  = alcista3 and cuerpo3 >= rango2*0.5
-        base_pequeña  = cuerpo2  <= cuerpo3*0.40  # Base ≤ 40% del rally previo
-        impulso_arriba= alcista1 and c1>h3        # Rompe sobre el máximo del rally
-        if rally_grande and base_pequeña and impulso_arriba:
-            return "⚡ RBI (Rally·Base·Impulse) [Oliver Velez] — setup de máxima prioridad",95,candle_low
+def clasificar_entorno(hist, adx_v, sma8v, precio):
+    """
+    Clasifica el entorno actual: Momentum, MeanReversion, Chop o Recuperación.
+    Basado en: cuerpos vs mechas de las últimas 5 velas + ADX + posición vs SMA8.
+    KoroushAK: solo hay dos estilos — Momentum (continuación) y Mean Reversion (rechazo).
+    """
+    try:
+        if len(hist) < 5:
+            return "N/D", "nd"
+        o = hist["Open"].values[-5:]
+        h = hist["High"].values[-5:]
+        c = hist["Close"].values[-5:]
+        l = hist["Low"].values[-5:]
 
-        # ── OLIVER VELEZ — GIFT (Gap + Impulse For Trade) ───────────────────
-        # Gap alcista de apertura + vela alcista fuerte = señal de entrada en la dirección
-        # del gap. La vela GIFT es la confirmación de que el gap no se cerró.
-        # Condiciones: gap alcista (o1 > c2) + cierre fuerte (c1 > o1 * 1.01)
-        gap_alcista   = o1 > c2   # abre sobre el cierre anterior
-        cuerpo_fuerte = alcista1 and cuerpo1 >= rango1*0.5
-        if gap_alcista and cuerpo_fuerte:
-            return "🎁 GIFT (Gap Impulse For Trade) [Oliver Velez] — gap alcista confirmado",92,candle_low
+        cuerpos    = [abs(c[i] - o[i]) for i in range(5)]
+        rangos     = [(h[i] - l[i]) if h[i] > l[i] else 0.001 for i in range(5)]
+        mechas_inf = [min(o[i], c[i]) - l[i] for i in range(5)]
+        ratio_body = [cuerpos[i] / rangos[i] for i in range(5)]
 
-        # ── CLÁSICAS — Hammer / Pin Bar alcista ─────────────────────────────
-        # Mecha inferior larga (≥ 2× cuerpo), cuerpo pequeño arriba, poca mecha superior
-        if (mecha_inf >= 2*cuerpo1 and mecha_sup <= cuerpo1*0.5
-                and cuerpo1 >= rango1*0.15 and alcista1):
-            return "🔨 Hammer (Martillo) — soporte fuerte con rechazo",90,candle_low
+        pct_momentum = sum(1 for r in ratio_body if r > 0.60) / 5   # cuerpos grandes
+        pct_wicks    = sum(1 for i in range(5) if mechas_inf[i] > rangos[i] * 0.40) / 5
+        alcistas     = sum(1 for i in range(5) if c[i] > o[i])
+        pct_sobre_s8 = (precio - sma8v) / sma8v * 100 if sma8v and sma8v > 0 else 0
 
-        # Pin Bar alcista: mecha inferior ≥ 60% del rango total
-        if mecha_inf >= rango1*0.60 and alcista1:
-            return "📌 Pin Bar alcista — rechazo de zona de venta, comprador mandando",88,candle_low
+        # Escalera grind alcista (KoroushAK) — momentum más fiable
+        if pct_momentum >= 0.6 and alcistas >= 4 and (adx_v or 0) >= 22:
+            return "🚀 Momentum fuerte", "momentum"
+        elif pct_momentum >= 0.4 and alcistas >= 3:
+            return "📈 Momentum moderado", "momentum"
+        elif pct_wicks >= 0.4 and pct_sobre_s8 <= 2.0:
+            return "🔄 Mean Reversion en nivel", "mean_reversion"
+        elif pct_momentum < 0.3 and pct_wicks < 0.3:
+            return "↔️ Chop — precaución", "chop"
+        else:
+            return "🟡 Recuperación", "recuperacion"
+    except:
+        return "N/D", "nd"
 
-        # ── CLÁSICAS — Bullish Engulfing ─────────────────────────────────────
-        # Vela alcista grande que envuelve completamente la vela roja anterior
-        if (alcista1 and bajista2 and o1<=c2 and c1>=o2 and cuerpo1>cuerpo2):
-            return "🟢 Bullish Engulfing — absorción total de vendedores",85,candle_low
 
-        # ── CLÁSICAS — Morning Star (3 velas) ───────────────────────────────
-        # Vela roja grande → doji/vela pequeña → vela verde que recupera >50% de la roja
-        doji_medio   = abs(c3-o3)<abs(c4-o4)*0.4 if len(c)>=5 else cuerpo2<cuerpo3*0.4
-        if (bajista2 and doji_medio and alcista1 and c1>(o2+c2)/2):
-            return "⭐ Morning Star — reversión de 3 velas confirmada",85,candle_low
+def detectar_estructura_hh_hl(hist, lookback=10):
+    """
+    Detecta si el precio está haciendo Higher Highs / Higher Lows.
+    Murphy AT: la tendencia alcista se define por HH y HL consecutivos.
+    Lookback: últimas 10 velas para detectar máximos y mínimos locales.
+    """
+    try:
+        if len(hist) < lookback:
+            return True, "Sin datos estructura"
+        highs = hist["High"].iloc[-lookback:].values
+        lows  = hist["Low"].iloc[-lookback:].values
 
-        # ── CLÁSICAS — Piercing Line ─────────────────────────────────────────
-        # Vela verde que abre bajo el mínimo anterior y cierra sobre la mitad de la roja
-        if (alcista1 and bajista2 and o1<l2 and c1>(o2+c2)/2 and c1<o2):
-            return "📈 Piercing Line — rebote alcista, cierra sobre 50% de la roja",72,candle_low
+        maximos = [highs[i] for i in range(1, len(highs) - 1)
+                   if highs[i] > highs[i-1] and highs[i] > highs[i+1]]
+        minimos = [lows[i] for i in range(1, len(lows) - 1)
+                   if lows[i] < lows[i-1] and lows[i] < lows[i+1]]
 
-        # ── DOJI EN SOPORTE (potencial señal) ───────────────────────────────
-        if cuerpo1 <= rango1*0.10 and bajista2 and c2<c3:
-            return "⚖️ Doji en soporte — esperar vela de confirmación mañana",50,candle_low
+        if len(maximos) >= 2 and len(minimos) >= 2:
+            hh = maximos[-1] > maximos[-2]
+            hl = minimos[-1] > minimos[-2]
+            if hh and hl:
+                return True,  "✅ HH/HL confirmado"
+            elif hh:
+                return True,  "⚠️ Higher High (HL pendiente)"
+            elif hl:
+                return False, "🟡 Higher Low (LH reciente — vigilar)"
+            else:
+                return False, "❌ LH/LL — estructura bajista"
+        return True, "Estructura neutral (datos insuf.)"
+    except:
+        return True, "Sin datos estructura"
 
-        # ── VELA VERDE FUERTE (confirmación de momentum) ─────────────────────
-        if alcista1 and cuerpo1 >= rango1*0.60 and mecha_inf <= cuerpo1*0.30:
-            return "💚 Vela verde fuerte — momentum alcista, entrada válida",68,candle_low
 
-        return "Vela sin patrón específico — esperar formación",38,candle_low
+def detectar_gap(precio, prev):
+    """
+    Linda Raschke: gaps grandes tienen mayor probabilidad de continuación.
+    No hacer fade de gaps fuertes — buscar continuación.
+    """
+    try:
+        if prev <= 0:
+            return False, "", "sin_gap"
+        pct_gap = (precio - prev) / prev * 100
+        if pct_gap >= 2.0:
+            return True, f"🚀 Gap alcista fuerte +{pct_gap:.1f}% (Raschke: continuación)", "fuerte"
+        elif pct_gap >= 0.5:
+            return True, f"📈 Gap moderado +{pct_gap:.1f}%", "moderado"
+        else:
+            return False, "", "sin_gap"
+    except:
+        return False, "", "sin_gap"
+
+
+def clasificar_vela_4h(ticker):
+    """
+    Descarga datos 1H y construye la vela 4H activa.
+    L2WTrades: la vela 4H determina si tu trade funcionará.
+    Expansión (cuerpo grande, dirección correcta) → setups limpios.
+    Consolidación/Chop → ruido, evitar entradas.
+    """
+    try:
+        hist_1h = yf.Ticker(ticker).history(period="5d", interval="1h")
+        if hist_1h.empty or len(hist_1h) < 4:
+            return "sin_datos", "Sin datos 4H"
+
+        # Vela 4H = últimas 4 velas de 1h disponibles
+        vela_o = float(hist_1h["Open"].iloc[-4])
+        vela_c = float(hist_1h["Close"].iloc[-1])
+        vela_h = float(hist_1h["High"].iloc[-4:].max())
+        vela_l = float(hist_1h["Low"].iloc[-4:].min())
+
+        rango  = vela_h - vela_l
+        if rango == 0:
+            return "consolidacion", "📊 Rango 4H = 0 — sin movimiento"
+
+        cuerpo    = abs(vela_c - vela_o)
+        mecha_inf = min(vela_o, vela_c) - vela_l
+        ratio     = cuerpo / rango
+        alcista   = vela_c > vela_o
+
+        if ratio >= 0.60 and alcista:
+            return "expansion", f"✅ Expansión 4H alcista (cuerpo {ratio:.0%})"
+        elif ratio >= 0.40 and alcista:
+            return "expansion_mod", f"🟡 Expansión 4H moderada (cuerpo {ratio:.0%})"
+        elif ratio < 0.25:
+            return "consolidacion", f"⚠️ Consolidación 4H (cuerpo {ratio:.0%}) — posible ruido"
+        elif mecha_inf > rango * 0.45 and alcista:
+            return "retracement", f"🔄 Retroceso 4H con soporte (mecha inf.)"
+        elif not alcista:
+            return "reversion", f"🔴 Vela 4H bajista — vigilar cierre"
+        else:
+            return "neutral", f"🟡 Vela 4H neutral"
     except Exception as ex:
-        return f"Error calculando velas: {str(ex)[:30]}",0,0
+        return "error", f"Error 4H: {str(ex)[:40]}"
+
 
 def check_earnings_proximos(ticker):
     try:
@@ -780,6 +809,14 @@ def obtener_datos(ticker):
             ath_52w = float(h.iloc[-252:].max()) if len(h)>=252 else float(h.max())
         mv,sv,hv_m,me=calc_macd(c); av,dip,dim,ae=calc_adx(h,l,c)
         atr_val=calc_atr(h,l,c); vela_patron,vela_fuerza=detectar_velas(hist)
+
+        # ── v7.2: nuevos campos de Price Action ─────────────────
+        sma8v_raw = sma(c, 8)
+        entorno_txt, entorno_tipo = clasificar_entorno(hist, av, sma8v_raw, precio)
+        hh_hl_ok, hh_hl_txt      = detectar_estructura_hh_hl(hist)
+        gap_ok, gap_txt, gap_tipo = detectar_gap(precio, prev)
+        # ────────────────────────────────────────────────────────
+
         nombre=ticker; sector="N/A"; beta=None
         try:
             info=s.info
@@ -796,176 +833,102 @@ def obtener_datos(ticker):
                 "beta":beta,
                 "vh":vh,"vh_proy":vh_proy,"vp":vp,"vol_r":vol_r,"ath_52w":ath_52w,
                 "vela_patron":vela_patron,"vela_fuerza":vela_fuerza,
-                "vela_low":vela_low,              # v8 — low de la vela de señal
-                "sma20_alcista":sma20_pendiente_alcista(hist, CONFIG["sma20_slope_dias"])[0],
-                "sma20_pendiente":sma20_pendiente_alcista(hist, CONFIG["sma20_slope_dias"])[1],
+                # v7.2 — Price Action fields
+                "entorno_txt":entorno_txt,"entorno_tipo":entorno_tipo,
+                "hh_hl_ok":hh_hl_ok,"hh_hl_txt":hh_hl_txt,
+                "gap_ok":gap_ok,"gap_txt":gap_txt,"gap_tipo":gap_tipo,
                 "error":None}
     except Exception as ex:
         return {"ticker":ticker,"error":str(ex)}
 
-def clasificar_smas(s20, s50, s200, atr):
-    """
-    v7.3 — Clasificación de SMAs en lugar de exclusión.
-    Las SMAs juntas NO se excluyen: son oportunidades tipo TRAMPOLÍN.
-    Las SMAs separadas con espacio SON tendencia lucrativa.
-    La información se pasa al mensaje de Telegram para que Lu decida.
-    """
-    if not all([s20, s50, s200, atr]) or atr <= 0:
-        return "SIN_DATOS", "📊 SMA: sin datos suficientes"
-    dist_20_50  = abs(s20 - s50)
-    dist_50_200 = abs(s50 - s200)
-    espacio_atr = dist_20_50 / atr  # cuántos ATR de distancia entre SMA20 y SMA50
-
-    if espacio_atr >= 3.0 and s20 > s50 > s200:
-        return "TENDENCIA", f"🚀 SMA TENDENCIA — espacio {espacio_atr:.1f}×ATR (> 3×) — runway amplio, momentum establecido"
-    elif espacio_atr >= 1.5 and s20 > s50 > s200:
-        return "ESPACIO_NORMAL", f"✅ SMA ESPACIO NORMAL — {espacio_atr:.1f}×ATR — setup estándar"
-    elif espacio_atr < 1.5 and s20 > s50:
-        return "TRAMPOLIN", f"🪜 SMA TRAMPOLÍN — {espacio_atr:.1f}×ATR (comprimidas) — posible catapulta si hay vela señal fuerte"
-    elif espacio_atr < 1.5 and s20 <= s50:
-        return "COMPRIMIDA_BAJISTA", f"⚠️ SMA COMPRIMIDAS BAJISTAS — {espacio_atr:.1f}×ATR — cautela, posible inicio de distribución"
-    else:
-        return "MIXTA", f"🔵 SMA MIXTA — {espacio_atr:.1f}×ATR — contexto no determinante"
-
 def analizar(d):
-    """
-    v8.0 — Filtros simplificados (5 obligatorios):
-    Precio>SMA200, SMA20 pendiente alcista, Vol>500K, ATR≥$1, Beta≥1.
-    Zona entrada: pullback SMA20 (-2% a +5%).
-    SMAs: clasificadas (Trampolín / Tendencia / Comprimidas).
-    """
     p=d["precio"]; s8,s20,s50,s200=d["sma8"],d["sma20"],d["sma50"],d["sma200"]
-    atr_v = d.get("atr") or 0
-
-    # v8 — SMA20 pendiente alcista (filtro base)
-    sma20_alcista = d.get("sma20_alcista", True)
-    # v8 — Zona de pullback SMA20
-    dist_sma20_pct = ((p - s20) / s20 * 100) if s20 and s20 > 0 else 0
-    en_pullback_sma20 = (CONFIG["pullback_sma20_min_pct"] <= dist_sma20_pct <= CONFIG["pullback_sma20_max_pct"])
-
-    # Fan — SMAs ordenadas: SMA200 es el macro, SMA50 el medio, SMA20 el momentum
-    c1=bool(p>s200)    if s200             else False  # Paso 1 — veto absoluto
-    c2=bool(s50>s200)  if s50 and s200     else False  # SMA50 > SMA200 — estructura
-    c3=bool(s20>s50)   if s20 and s50      else False  # SMA20 > SMA50  — impulso
-    c4=bool(p>s20)     if s20              else False  # Precio > SMA20 — momentum
-
+    # Fan redefinido — SMAs clave: 200, 50, 20 (jerarquía de mayor a menor timeframe)
+    # c1: Paso 1 del sistema — precio debe estar SOBRE SMA200
+    c1=bool(p>s200) if s200 else False        # Precio > SMA200 (PASO 1 — veto si falla)
+    c2=bool(s50>s200) if s50 and s200 else False  # SMA50 > SMA200 (tendencia estructural)
+    c3=bool(s20>s50) if s20 and s50 else False    # SMA20 > SMA50  (impulso medio)
+    c4=bool(p>s20) if s20 else False              # Precio > SMA20  (momentum inmediato)
     fan=sum([c1,c2,c3,c4]); en_rango=CONFIG["price_min"]<=p<=CONFIG["price_max"]
     vol_r=d["vol_r"]; vol_ok=d["vh"]>=CONFIG["min_volume_abs"]
     tardia=bool(s8 and p>s8*1.02)
     rsi_v=d["rsi"] if d["rsi"] else 0; adx_v=d["adx"] if d["adx"] else 0
-
-    # ── Clasificación SMA — NO exclusión (v7.3) ──────────────────────────────
-    sma_tipo, sma_label = clasificar_smas(s20, s50, s200, atr_v)
-
-    # ── Scoring ──────────────────────────────────────────────────────────────
-    pts_fan = fan * 10  # max 40
-
-    # RSI v7.3: zona óptima 40-55. >58 = sobrecomprado para Sirio.
-    if 45<=rsi_v<=55:     pts_rsi = 15  # zona perfecta — precio acaba de recuperar
-    elif 40<=rsi_v<45:    pts_rsi = 10  # recuperando — válido, menos ideal
-    elif 55<rsi_v<=58:    pts_rsi = 8   # válido pero en el límite superior
-    elif rsi_v<40:        pts_rsi = 0   # demasiado débil aún
-    else:                 pts_rsi = 0   # >58 — sobrecomprado para sistema Sirio
-
-    # Bonus SMA: Trampolín puntúa diferente a Tendencia
-    pts_sma_bonus = 0
-    if sma_tipo == "TENDENCIA":          pts_sma_bonus = 10  # runway amplio
-    elif sma_tipo == "ESPACIO_NORMAL":   pts_sma_bonus = 6
-    elif sma_tipo == "TRAMPOLIN":        pts_sma_bonus = 8   # alta potencial si vela fuerte
-
+    pts_fan = fan*10
+    # RSI óptimo 50-65. Penalización clara por sobrecomprado (>70)
+    if 55<=rsi_v<=65:     pts_rsi = 15
+    elif 50<=rsi_v<70:    pts_rsi = 8
+    elif 45<=rsi_v<50:    pts_rsi = 4
+    elif rsi_v>=70:       pts_rsi = 0   # sobrecomprado — sin puntos
+    else:                 pts_rsi = 0   # débil
     pts_adx=(15 if adx_v>=30 else 12 if adx_v>=25 else 8 if adx_v>=20 else 0)
+    # Volumen: 0.6x = 0 puntos. Necesita al menos 0.8x para sumar.
     if vol_r>=2.0:        pts_vol = 15
     elif vol_r>=1.5:      pts_vol = 12
     elif vol_r>=1.0:      pts_vol = 8
     elif vol_r>=0.8:      pts_vol = 4
-    else:                 pts_vol = 0
-    pts_vela=int(d.get("vela_fuerza",0)*0.15)
-    score=min(100, pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela+pts_sma_bonus)
+    else:                 pts_vol = 0   # vol bajo — sin puntos
+    pts_vela=int(d.get("vela_fuerza",0)*0.10)   # max 9 pts (90×0.10)
+
+    # ── v7.2: nuevos componentes Price Action ──────────────────
+    # Entorno (KoroushAK): momentum suma, chop no suma — el entorno SÍ importa
+    entorno_tipo = d.get("entorno_tipo", "nd")
+    pts_entorno = (10 if entorno_tipo == "momentum"
+                   else 8 if entorno_tipo == "mean_reversion"
+                   else 4 if entorno_tipo == "recuperacion"
+                   else 0)   # chop o nd = 0
+
+    # Estructura HH/HL (Murphy): mercado en tendencia alcista confirmada
+    pts_hh_hl = 5 if d.get("hh_hl_ok", True) else 0
+
+    # Gap (Raschke): gap alcista → mayor probabilidad de continuación
+    gap_tipo = d.get("gap_tipo", "sin_gap")
+    pts_gap = (8 if gap_tipo == "fuerte" else 4 if gap_tipo == "moderado" else 0)
+    # ───────────────────────────────────────────────────────────
+
+    score=min(100, pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela+pts_entorno+pts_hh_hl+pts_gap)
     return {"fan":fan,"c1":c1,"c2":c2,"c3":c3,"c4":c4,
             "en_rango":en_rango,"vol_r":vol_r,"vol_ok":vol_ok,"senal_tardia":tardia,
-            "sma_tipo":sma_tipo,"sma_label":sma_label,
-            "sma20_alcista":sma20_alcista,"en_pullback_sma20":en_pullback_sma20,
-            "dist_sma20_pct":round(dist_sma20_pct,2),  # v8
             "score":score,
-            "score_det":f"Fan:{pts_fan}+RSI:{pts_rsi}+SMA:{pts_sma_bonus}+ADX:{pts_adx}+Vol:{pts_vol}+Vela:{pts_vela}"}
+            "score_det":(f"Fan:{pts_fan}+RSI:{pts_rsi}+ADX:{pts_adx}+"
+                         f"Vol:{pts_vol}+Vela:{pts_vela}+"
+                         f"Entorno:{pts_entorno}+HH/HL:{pts_hh_hl}+Gap:{pts_gap}")}
 
-def posicion(precio, ath_52w=None, atr=None, beta=None, vela_low=None):
+def posicion(precio, ath_52w=None, atr=None, beta=None):
     """
-    v8.0 — Stop = low de la vela de confirmación (más preciso que ATR fijo).
-    Si vela_low no disponible o inválido → ATR como respaldo → 6% fijo como último recurso.
-
-    Sistema de salidas v8:
-    ─────────────────────────────────────────────────────────────
-    15%  en T1 (1.5R)  → cerrar acc_t1 acciones aquí
-    50%  en T2 (2.5R)  → cerrar acc_t2 acciones aquí
-    35%  trailing      → por swing lows recientes o cierre < SMA20 diario
-    ─────────────────────────────────────────────────────────────
-    Gestión de stop:
-    · Al llegar a T1 → mover stop del 85% restante a Break Even (precio entrada)
-    · Al llegar a T2 → opcional: mover stop del 35% a +0.3R ó +0.5R
+    Stop calculado con ATR + Beta — más preciso que el % fijo.
+    - Beta alta (>1.5): stop más amplio (2.0x ATR) — acción volátil
+    - Beta normal (0.8-1.5): stop estándar (1.5x ATR)
+    - Beta baja (<0.8): stop más ajustado (1.2x ATR) — acción estable
+    - Si no hay ATR disponible: usa 6% fijo como respaldo
     """
-    # ── Calcular stop ────────────────────────────────────────────────────────
-    metodo_stop = "pct_fijo"
-    if vela_low and float(vela_low) > 0 and float(vela_low) < precio:
-        # Ligeramente bajo el low de la vela de confirmación (buffer 0.3%)
-        stop = round(float(vela_low) * 0.997, 2)
-        metodo_stop = "candle_low"
-    elif atr and atr > 0 and precio > 0:
+    if atr and atr > 0 and precio > 0:
         b = beta if beta and beta > 0 else 1.0
-        mult = 2.0 if b >= 1.5 else (1.5 if b >= 0.8 else 1.2)
-        riesgo_atr = max(precio*0.03, min(precio*0.08, atr * mult))
+        if b >= 1.5:    mult = 2.0   # volátil — stop más amplio
+        elif b >= 0.8:  mult = 1.5   # normal
+        else:           mult = 1.2   # estable — stop ajustado
+        riesgo_atr = atr * mult
+        # No exceder 8% ni ser menor que 3% del precio
+        riesgo_atr = max(precio*0.03, min(precio*0.08, riesgo_atr))
         stop = round(precio - riesgo_atr, 2)
-        metodo_stop = "atr"
     else:
-        stop = round(precio * (1 - CONFIG["stop_loss_pct"] / 100), 2)
+        # Respaldo: 6% fijo
+        stop = round(precio*(1-CONFIG["stop_loss_pct"]/100), 2)
 
-    rx = precio - stop
-    # Validación: stop máximo 8%, mínimo viable
-    if rx <= 0 or rx / precio > 0.08:
-        stop = round(precio * 0.92, 2)
-        rx   = precio - stop
-        metodo_stop += "_capped8pct"
-    if rx <= 0: rx = precio * 0.06
-
-    # ── Tamaño de posición ───────────────────────────────────────────────────
-    acc  = max(1, int(CONFIG["riesgo_fijo_usd"] / rx))
-    tot  = round(acc * precio, 2)
-    perd = round(acc * rx, 2)
-
-    # ── Targets v8 ───────────────────────────────────────────────────────────
-    t1 = round(precio + 1.5 * rx, 2)   # T1 = 1.5R  → cerrar 15%
-    t2 = round(precio + 2.5 * rx, 2)   # T2 = 2.5R  → cerrar 50%
-    # T3 = trailing SMA20 diario (no nivel fijo)
-
-    # Cap en ATH 52s
+    rx  = precio - stop
+    acc = max(1, int(CONFIG["riesgo_fijo_usd"] / rx))
+    tot = round(acc*precio, 2)
+    perd= round(acc*rx, 2)
+    t1  = round(precio + 1*rx, 2)
+    t2  = round(precio + 2*rx, 2)
+    t3  = round(precio + 3*rx, 2)
     if ath_52w and ath_52w > precio:
-        techo = round(ath_52w * 0.98, 2)
-        if t2 > techo: t2 = techo
-
-    # ── Partes en acciones ───────────────────────────────────────────────────
-    acc_t1 = max(1, round(acc * 0.15))           # 15%
-    acc_t2 = max(1, round(acc * 0.50))           # 50%
-    acc_t3 = max(1, acc - acc_t1 - acc_t2)       # 35% trailing
-
-    # ── Niveles de gestión de stop ───────────────────────────────────────────
-    be              = precio                          # break even
-    stop_post_t2_lo = round(precio + 0.3 * rx, 2)   # +0.3R (opción conservadora)
-    stop_post_t2_hi = round(precio + 0.5 * rx, 2)   # +0.5R (opción agresiva)
-
-    return {
-        "acc":acc, "tot":tot, "stop":stop, "perd":perd,
-        "t1":t1, "t2":t2, "rx":rx,
-        "rr_t1": round(1.5, 1),
-        "rr_t2": round(2.5, 1),
-        "acc_t1":acc_t1, "acc_t2":acc_t2, "acc_t3":acc_t3,
-        "be":be,
-        "stop_post_t2_lo":stop_post_t2_lo,
-        "stop_post_t2_hi":stop_post_t2_hi,
-        "metodo_stop":metodo_stop,
-        # Compatibilidad: los backtest y msg_corto usan t3 → pasar t2 como fallback
-        "t3": round(precio + 3.5 * rx, 2),
-        "rr":  round(1.5, 1)
-    }
+        techo = round(ath_52w*0.98, 2)
+        if techo > t1:
+            if t2 > techo: t2 = techo
+            if t3 > techo: t3 = techo
+    rr = round((t1-precio)/rx, 2)
+    return {"acc":acc,"tot":tot,"stop":stop,"perd":perd,
+            "t1":t1,"t2":t2,"t3":t3,"rx":rx,"rr":rr}
 
 def calc_probabilidades(fan,adx,rsi,vol_r):
     base={4:(68,42,25),3:(52,32,18),2:(38,20,10)}
@@ -1122,7 +1085,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     atr_v  = d["atr"] if d["atr"] else 0
     atr_pct= round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
     rsi_tag= ("débil" if rsi_v<CONFIG["rsi_min"]
-              else "sobrecomprado — fuera rango Sirio" if rsi_v>CONFIG["rsi_max"] else "OK ✓")
+              else "sobrecomprado" if rsi_v>CONFIG["rsi_max"] else "OK")
     vol_r   = a["vol_r"]
     tardia_v = "\n⚠️ precio extendido &gt;2% sobre SMA8" if a.get("senal_tardia") else ""
     p1,p2,p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, vol_r)
@@ -1150,11 +1113,10 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
     # MACD
     macd_ico = "🟢" if "Bull" in d["macd_e"] else "🔴"
 
-    # RSI — zona óptima 40-58 (v7.3)
-    if 45 <= rsi_v <= 55:    rsi_ico = "🟢"  # zona perfecta
-    elif 40 <= rsi_v < 45:   rsi_ico = "🟡"  # recuperando
-    elif 55 < rsi_v <= 58:   rsi_ico = "🟡"  # limite superior
-    else:                     rsi_ico = "🔴"  # fuera de rango
+    # RSI — zona óptima 50-65
+    if 50 <= rsi_v <= 65:    rsi_ico = "🟢"
+    elif 45 <= rsi_v <= 72:  rsi_ico = "🟡"
+    else:                     rsi_ico = "🔴"
 
     # ADX — fuerza de tendencia
     adx_v = d["adx"] if d["adx"] else 0
@@ -1187,9 +1149,13 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"{'✅' if a['c1'] else '❌'} Precio &gt; SMA200  {d['sma200']:.2f}\n"
         f"{'✅' if a['c2'] else '❌'} SMA50  &gt; SMA200  {d['sma50']:.2f}\n"
         f"{'✅' if a['c3'] else '❌'} SMA20  &gt; SMA50   {d['sma20']:.2f}\n"
-        f"{'✅' if a['c4'] else '❌'} Precio &gt; SMA20   {d['sma20']:.2f}\n"
-        f"{a.get('sma_label','📊 SMA: sin clasificar')}\n"
-        f"{'✅' if d.get('sma20_alcista',True) else '❌'} SMA20 pendiente: {d.get('sma20_pendiente',0):+.2f}%  |  Pullback zona: {a.get('dist_sma20_pct',0):+.1f}% {'✅' if a.get('en_pullback_sma20') else '⚠️'}\n\n"
+        f"{'✅' if a['c4'] else '❌'} Precio &gt; SMA20   {d['sma20']:.2f}\n\n"
+
+        f"<b>🧭 Price Action</b>\n"
+        f"Entorno: {d.get('entorno_txt','N/D')}\n"
+        f"Estructura: {d.get('hh_hl_txt','Sin datos')}\n"
+        + (f"📊 {d.get('gap_txt','')}\n" if d.get('gap_ok') else "")
+        + "\n"
 
         f"<b>📏 Indicadores</b>\n"
         f"{macd_ico} MACD: {d['macd_e']}\n"
@@ -1210,18 +1176,18 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
         f"<code>{barra}</code>\n"
         f"<i>{a.get('score_det','')}</i>\n\n"
 
-        f"<b>💰 Posición — Riesgo $100 máximo</b>\n"
-        f"📍 Entrada:  <b>{d['precio']:.2f} USD</b>  |  <b>{pos['acc']} acciones</b>  |  Capital: {pos['tot']:.0f} USD\n"
-        f"🛑 Stop:     <b>{pos['stop']:.2f}</b>  ({'low vela' if pos.get('metodo_stop','')=='candle_low' else 'ATR/6%'})  |  Riesgo: {pos['perd']:.0f} USD\n"
-        f"🎯 T1 (1.5R): <b>{pos['t1']:.2f}</b>  → cerrar {pos['acc_t1']} acc (15%)\n"
-        f"🎯 T2 (2.5R): <b>{pos['t2']:.2f}</b>  → cerrar {pos['acc_t2']} acc (50%)\n"
-        f"🚀 Trailing:  {pos['acc_t3']} acc (35%) — swing lows / cierre &lt; SMA20\n\n"
+        f"<b>💰 Posición</b>\n"
+        f"Entrada: {d['precio']:.2f} USD  |  <b>{pos['acc']} acc</b>  |  Capital: {pos['tot']:.0f} USD\n"
+        f"🛑 Stop:    {pos['stop']:.2f}  (-6% / -1R)\n"
+        f"🎯 T1:      {pos['t1']:.2f}  (+{((pos['t1']/d['precio'])-1)*100:.1f}%)\n"
+        f"🎯 T2:      {pos['t2']:.2f}  (+{((pos['t2']/d['precio'])-1)*100:.1f}%)\n"
+        f"🎯 T3:      {pos['t3']:.2f}  (+{((pos['t3']/d['precio'])-1)*100:.1f}%)\n"
+        f"🚀 Runner:  trail EMA8\n"
+        f"R/R: {pos['rr']:.1f}x  |  Riesgo: {pos['perd']:.0f} USD\n\n"
 
-        f"<b>🗓 Gestión de Stop — Sistema Sirio v8</b>\n"
-        f"✅ Al llegar T1 ({pos['t1']:.2f}) → mover stop del 85% a BE ({pos['be']:.2f})\n"
-        f"✅ Al llegar T2 ({pos['t2']:.2f}) → mover stop del 35% a +0.3R ({pos['stop_post_t2_lo']:.2f})\n"
-        f"   Opción agresiva: stop a +0.5R ({pos['stop_post_t2_hi']:.2f})\n"
-        f"🚀 Trailing 35%: por swing lows o cierre diario bajo SMA20\n\n"
+        f"<b>🗓 Gestión de Salida — Sistema Sirio</b>\n"
+        f"25%({s25}) T1  |  30%({s30}) T2  |  20%({s20x}) T3  |  25%({s25b}) trail\n"
+        f"⏱ Time-stop: 7 días sin T1 → salida total\n\n"
 
         f"<b>📊 Probabilidades</b>\n"
         f"T1: {p1}%  |  T2: {p2}%  |  T3: {p3}%\n\n"
@@ -1237,7 +1203,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
             else f"<b>🤖 IA</b> — <i>análisis no disponible en esta señal</i>\n\n"
         )
 
-        + f"<i>Sistema Sirio v8 — Solares</i> 🌟\n"
+        + f"<i>Sistema Sirio v7.2 — Solares</i> 🌟\n"
         f"─────────────────────────────────\n"
         f"⚠️ <i>AVISO LEGAL: Esta información tiene carácter "
         f"exclusivamente educativo e informativo. No constituye "
@@ -1301,7 +1267,7 @@ def build_msg_corto(d, a, pos, ia, tendencia_semanal, dist_s8=None):
         f"💲 Precio actual: <b>{d['precio']:.2f}</b> ({d['pct']:+.1f}%)\n"
         f"🛑 Stop: {pos['stop']:.2f}  |  🎯 T1: {pos['t1']:.2f}  |  T2: {pos['t2']:.2f}\n\n"
 
-        f"<i>Mensaje completo ya fue enviado hoy — este es el seguimiento (v8).\n"
+        f"<i>Mensaje completo ya fue enviado hoy — este es el seguimiento.\n"
         f"Sistema Sirio v7 — Solares</i> 🌟"
     )
 
@@ -1328,6 +1294,7 @@ def verificar_señal_activa(ticker):
     """
     Re-verifica si una señal del día sigue válida para el resumen 4H.
     Activa = fan 4/4 + precio ≤ 3% sobre SMA8 + MACD alcista.
+    v7.2: incluye clasificación de vela 4H (L2WTrades).
     """
     try:
         hist = yf.Ticker(ticker).history(period="60d", interval="1d")
@@ -1337,15 +1304,19 @@ def verificar_señal_activa(ticker):
         sma8v   = sma(c, 8);  sma20v = sma(c, 20)
         sma50v  = sma(c, 50); sma200v= sma(c, 200)
         if not all([sma8v, sma20v, sma50v, sma200v]): return None
-        # Fan consistente con analizar() — SMAs clave: 200, 50, 20
         fan     = sum([precio>sma200v, sma50v>sma200v, sma20v>sma50v, precio>sma20v])
         pct_s8  = (precio-sma8v)/sma8v*100
         rsi_v   = calc_rsi(c)
         _,_,_,macd_e = calc_macd(c)
+
+        # v7.2: fase de la vela 4H actual
+        fase_4h, fase_4h_txt = clasificar_vela_4h(ticker)
+
         return {
             "precio": round(precio,2), "sma8": round(sma8v,2),
             "fan": fan, "pct_s8": round(pct_s8,1),
             "macd": macd_e, "rsi": round(rsi_v,0) if rsi_v else 0,
+            "fase_4h": fase_4h, "fase_4h_txt": fase_4h_txt,
             "activa": fan==4 and pct_s8<=3.0 and "Bull" in macd_e
         }
     except:
@@ -1404,14 +1375,22 @@ def enviar_resumen_4h(estado):
         # Solo llega aquí si hay señales que SIGUEN activas
         lines = []
         for t, v in activas:
-            dist = f"+{v['pct_s8']:.1f}% SMA8" if v['pct_s8'] > 0 else "en SMA8"
-            lines.append(f"  ✅ <b>{t}</b> · ${v['precio']} · RSI {v['rsi']} · {dist}")
+            dist     = f"+{v['pct_s8']:.1f}% SMA8" if v['pct_s8'] > 0 else "en SMA8"
+            fase_txt = v.get("fase_4h_txt", "")
+            fase_ico = ("✅" if v.get("fase_4h") in ("expansion","expansion_mod")
+                        else "⚠️" if v.get("fase_4h") in ("consolidacion","neutral")
+                        else "🔴" if v.get("fase_4h") == "reversion"
+                        else "🔄")
+            lines.append(
+                f"  ✅ <b>{t}</b> · ${v['precio']} · RSI {v['rsi']} · {dist}\n"
+                f"  {fase_ico} 4H: {fase_txt}"
+            )
 
         send_telegram(
             f"🔄 <b>Sirio — señal sigue activa</b>\n"
             f"🕐 {hora_et()}\n\n"
             + "\n".join(lines)
-            + f"\n\n<i>Sistema Sirio v7 — Solares</i> 🌟"
+            + f"\n\n<i>Sistema Sirio v7.2 — Solares</i> 🌟"
         )
         enviados.append(clave)
         estado["resumen_4h"] = enviados
@@ -1442,7 +1421,7 @@ def main():
                 f"🕐 {hora_et()}\n\n"
                 f"🏛 <b>{nombre_festivo}</b> — NYSE cerrado hoy\n"
                 f"Sirio no escaneará. Próximo día hábil activo.\n\n"
-                f"<i>Sistema Sirio v8 — Solares</i> 🌟"
+                f"<i>Sistema Sirio v7 — Solares</i> 🌟"
             )
             if ok_f:
                 estado["festivo_enviado"] = True
@@ -1490,28 +1469,9 @@ def main():
         print(f"{d['precio']:.2f} RSI:{rsi_s} MACD:{d['macd_e']} [{d.get('sector','?')[:10]}]")
         a = analizar(d)
 
-        # ── v8: ETF commodities — excluidos del swing scanner ─────────────
-        if ticker in CONFIG.get("etf_commodities_excluidos", []):
-            print(f"    skip: ETF commodity excluido — {ticker}")
-            razones["etf_commodity"] = razones.get("etf_commodity", 0) + 1; continue
-
-        # ── v8: FILTRO ZOMBIE — ticker sin vela real repetido N scans ────────
-        zombie = cargar_zombie()
-        hoy_str = str(date.today())
-        # Si está en período de silencio
-        silenciados = zombie.get("silenciados", {})
-        if ticker in silenciados:
-            desde = silenciados[ticker]
-            try:
-                dias_silencio = (date.today() - date.fromisoformat(desde)).days
-                if dias_silencio < CONFIG["zombie_silencio_dias"]:
-                    print(f"    skip: zombie silenciado ({dias_silencio}d/{CONFIG['zombie_silencio_dias']}d)")
-                    razones["zombie"] = razones.get("zombie", 0) + 1; continue
-                else:
-                    del silenciados[ticker]   # expiró el silencio
-                    zombie["contadores"].pop(ticker, None)
-                    guardar_zombie(zombie)
-            except: pass
+        # v7.2: trackear entorno chop para el status periódico
+        if d.get("entorno_tipo") == "chop":
+            razones["chop"] = razones.get("chop", 0) + 1
 
         # ── PASO 1 OBLIGATORIO: precio SOBRE SMA200 — veto absoluto ──────
         # Regla Lu: sin esta condición NO hay entrada. Gate previo a cualquier score.
@@ -1519,47 +1479,25 @@ def main():
             print(f"    skip: precio {d['precio']:.2f} < SMA200 {d['sma200']:.2f} — Paso 1 violado")
             razones["sma200"] = razones.get("sma200", 0) + 1; continue
 
-        # ── Filtros técnicos v7.3 ──────────────────────────────────────────────
-        # Fan mínimo: 2/4. Fan 2 = SMA200 OK + SMA50>SMA200.
-        # La clasificación SMA (Trampolín/Tendencia) ya está en analizar().
-        fan_minimo_observar = CONFIG["min_fan_to_alert"]  # = 2
+        # ── Filtros técnicos ──
+        # FIX v7.1: Fan 3/4 permitido como señal OBSERVAR si score >= 70.
+        # Fan 4/4 sigue siendo requerido para señal ENTRAR (estandar).
+        # En mercados laterales/volatiles (VIX > 18), Fan 4/4 es muy poco frecuente.
+        fan_minimo_observar = 3
         if a["fan"] < fan_minimo_observar or not a["en_rango"] or not a["vol_ok"]:
             razones["fan"] = razones.get("fan", 0) + 1; continue
-        es_fan2 = (a["fan"] == 2); es_fan3 = (a["fan"] == 3)
-        # Fan 2: necesita score más alto y vela señal fuerte para compensar
-        score_minimo_efectivo = (72 if es_fan2 else 68 if es_fan3 else CONFIG["score_minimo"])
-
-        # ── FILTRO ATR MÍNIMO $1 (v7.3) ───────────────────────────────────────
-        atr_check = d.get("atr", 0) or 0
-        if atr_check < CONFIG.get("atr_min_usd", 1.0):
-            print(f"    skip: ATR ${atr_check:.2f} < $1.00 — poco rango diario para swing")
-            razones["atr_bajo"] = razones.get("atr_bajo", 0) + 1; continue
-
-        # ── v8: SMA20 PENDIENTE ALCISTA — filtro obligatorio ─────────────────
-        if not d.get("sma20_alcista", True):
-            pend = d.get("sma20_pendiente", 0)
-            print(f"    skip: SMA20 sin pendiente alcista ({pend:+.3f}%) — filtro base v8")
-            razones["sma20_bajista"] = razones.get("sma20_bajista", 0) + 1; continue
-
-        # ── FILTRO BETA MÍNIMO 1.0 (v7.3) ─────────────────────────────────────
-        beta_check = d.get("beta", 0) or 0
-        if 0 < beta_check < CONFIG.get("beta_min", 1.0):
-            print(f"    skip: Beta {beta_check:.2f} < 1.0 — se mueve menos que el mercado")
-            razones["beta_bajo"] = razones.get("beta_bajo", 0) + 1; continue
+        # Fan 3/4: requiere score mas alto para compensar el fan incompleto
+        es_fan3 = (a["fan"] == 3)
+        score_minimo_efectivo = 65 if es_fan3 else CONFIG["score_minimo"]
         # Volumen ratio mínimo 0.7x
         if a["vol_r"] < 0.7:
             print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
             razones["vol_bajo"] = razones.get("vol_bajo", 0) + 1; continue
-        # ── FILTRO RSI 40-58 (v7.3) ────────────────────────────────────────────
-        # Entrar cuando el precio acaba de recuperar, no cuando ya corrió.
-        # RSI < 40: mercado aún débil, esperar. RSI > 58: ya corrió mucho.
+        # RSI sobrecomprado extremo
         rsi_v_check = d.get("rsi", 0) or 0
-        if rsi_v_check > CONFIG["rsi_max"]:  # > 58
-            print(f"    skip: RSI {rsi_v_check:.0f} > {CONFIG['rsi_max']} — sobrecomprado para Sirio v7.3")
-            razones["rsi_alto"] = razones.get("rsi_alto", 0) + 1; continue
-        if rsi_v_check > 0 and rsi_v_check < CONFIG["rsi_min"]:  # < 40
-            print(f"    skip: RSI {rsi_v_check:.0f} < {CONFIG['rsi_min']} — precio aún débil")
-            razones["rsi_bajo"] = razones.get("rsi_bajo", 0) + 1; continue
+        if rsi_v_check > 80:
+            print(f"    skip: RSI {rsi_v_check:.0f} > 80 sobrecomprado extremo")
+            razones["rsi_extremo"] = razones.get("rsi_extremo", 0) + 1; continue
         # ETFs de renta fija
         nombre_check = d.get("nombre","").lower()
         if d.get("sector","") in ("","N/A") and any(w in nombre_check for w in
@@ -1602,31 +1540,13 @@ def main():
         largo_enviado = estado.get("largo_enviado", [])
         es_repetido   = ticker in largo_enviado
 
-        sma8v      = d.get("sma8") or 0
-        dist_s8    = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
-        sma20v     = d.get("sma20") or 0
-        dist_sma20 = a.get("dist_sma20_pct", ((d["precio"] - sma20v) / sma20v * 100) if sma20v > 0 else 0)
+        sma8v    = d.get("sma8") or 0
+        dist_s8  = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
 
-        # v8 — Zona de entrada: pullback a SMA20 (no zona SMA8)
-        # Precio válido entre -2% bajo SMA20 y +5% sobre SMA20
-        if dist_sma20 > CONFIG["pullback_sma20_max_pct"]:
-            print(f"    skip: {dist_sma20:.1f}% sobre SMA20 — fuera de zona pullback (max +{CONFIG['pullback_sma20_max_pct']}%)")
-            # Registrar en zombie counter — ticker pasa filtros pero no tiene setup
-            zombie = cargar_zombie()
-            cnt = zombie.get("contadores", {})
-            cnt[ticker] = cnt.get(ticker, 0) + 1
-            zombie["contadores"] = cnt
-            if cnt[ticker] >= CONFIG["zombie_max_scans"]:
-                zombie.setdefault("silenciados", {})[ticker] = str(date.today())
-                print(f"    ⚠️ zombie: {ticker} silenciado por {CONFIG['zombie_silencio_dias']} días")
-            guardar_zombie(zombie)
-            razones["fuera_pullback"] = razones.get("fuera_pullback", 0) + 1
+        if dist_s8 > 2.0:
+            print(f"    skip señal: extendida {dist_s8:.1f}% sobre SMA8 — sin entrada")
+            razones["extendida"] = razones.get("extendida", 0) + 1
             continue
-        # Limpiar contador zombie si el ticker está en zona válida
-        zombie = cargar_zombie()
-        if ticker in zombie.get("contadores", {}):
-            del zombie["contadores"][ticker]
-            guardar_zombie(zombie)
 
         # ── COOLDOWN ACTUALIZACIÓN — mínimo 2h entre señal inicial y update ──
         # Reglas:
@@ -1657,7 +1577,7 @@ def main():
         noticias_yh = []
         if datos_sent.get("yahoo"):
             noticias_yh = datos_sent["yahoo"].get("titulares", [])
-        pos = posicion(d["precio"], d.get("ath_52w"), d.get("atr"), d.get("beta"), d.get("vela_low"))
+        pos = posicion(d["precio"], d.get("ath_52w"), d.get("atr"), d.get("beta"))
         ia  = analizar_ia(d, a, pos, sc_sent, tend_sem, noticias_yh)
         print(f"     IA: {ia['prob']}% — {ia['senal']}")
 
@@ -1720,12 +1640,13 @@ def main():
         hb_ok = send_telegram(
             f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()} · {zona_txt}\n\n"
-            f"✅ Sirio activo · primer escaneo del día\n"
-            f"⚙️ ~500 tickers · 5 filtros base · SMA20↑ · pullback SMA20 · ATR>$1 · Beta>1\n"
+            f"✅ Sirio v7.2 activo · primer escaneo del día\n"
+            f"⚙️ ~490 tickers · score ≥65 · ATH ≥20% · precio>SMA200 · fan 3-4/4\n"
+            f"🧭 Filtros PA: Entorno · HH/HL · Gap · Fase 4H\n"
             f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
             f"<i>Señal nueva → aviso inmediato.</i>\n"
             f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"
-            f"<i>Sistema Sirio v8 — Solares</i> 🌟"
+            f"<i>Sistema Sirio v7.2 — Solares</i> 🌟"
         )
         if hb_ok:
             estado["heartbeat_enviado"] = True
@@ -1750,11 +1671,11 @@ def main():
     debe_status     = (nuevas == 0) and ((mins_silencio >= 60) or es_ultimo_scan or safety_net)
 
     if debe_status:
-        mapa = {"fan":f"Fan<{CONFIG['min_fan_to_alert']}/4","sma200":"Precio<SMA200","score":"Score<65","earnings":"Earnings",
-                "atr_bajo":"ATR<$1","beta_bajo":"Beta<1","rsi_alto":f"RSI>{CONFIG['rsi_max']}","rsi_bajo":f"RSI<{CONFIG['rsi_min']}",
+        mapa = {"fan":"Fan 4/4","sma200":"Precio<SMA200","score":"Score<65","earnings":"Earnings",
                 "semanal":"Semanal baj.","tardia":"Tardía","error":"Error datos",
                 "cerca_ath":"ATH<25%","extendida":">2%SMA8",
-                "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80"}
+                "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80",
+                "chop":"Chop/rango"}
         top5 = sorted(razones.items(), key=lambda x:x[1], reverse=True)[:5]
         skips_txt = " · ".join(f"{mapa.get(k,k)}:{v}" for k,v in top5) if top5 else "sin datos"
         señales_hoy = count + nuevas

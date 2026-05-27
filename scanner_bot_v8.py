@@ -1,14 +1,7 @@
 # -*- coding: utf-8 -*-
 # ═══════════════════════════════════════════════════════════════
-#  Solares — Sistema Sirio Bot  v7.2
+#  Solares — Sistema Sirio Bot  v6.0  (DEFINITIVO)
 #  Trader : Lu Espitia  |  Solares Trading
-#
-#  MEJORAS v7.2 (Price Action upgrade):
-#  + clasificar_entorno()      — Momentum / MeanReversion / Chop
-#  + detectar_estructura_hh_hl() — Estructura HH/HL (Murphy)
-#  + detectar_gap()            — Linda Raschke: gaps → continuación
-#  + clasificar_vela_4h()      — Fase 4H en re-verificación (L2WTrades)
-#  + Score normalizado a 100 con nuevos componentes
 # ═══════════════════════════════════════════════════════════════
 import yfinance as yf
 import pandas as pd
@@ -62,18 +55,18 @@ def es_dia_festivo_nyse():
     return (nombre is not None, nombre or "")
 
 CONFIG = {
-    "capital_usd":         33140,
-    "riesgo_fijo_usd":     150,
+    "capital_usd":         20275,
+    "riesgo_fijo_usd":     100,
     "stop_loss_pct":       6.0,
     "price_min":           10.0,
     "price_max":           150.0,
     "rsi_min":             45,
-    "rsi_max":             72,
+    "rsi_max":             65,
     "min_volume_abs":      500_000,
     "min_fan_to_alert":    4,
     "score_minimo":        65,    # 65/100 acordado originalmente
     "earnings_dias_min":   5,
-    "max_tickers_scan":    500,  # ahora tenemos universo grande
+    "max_tickers_scan":    900,  # v8: S&P500 + curado + movers  # ahora tenemos universo grande
     # Sin límite de señales — el bot informa, Lu decide
     # El score compuesto (fan+RSI+ADX+vol+vela) ya filtra lo irrelevante
     "max_alertas_dia":     99,
@@ -98,7 +91,8 @@ def cargar_estado():
             e=json.load(f)
         if e.get("fecha")!=str(date.today()):
             return {"fecha":str(date.today()),"alertados":[],"largo_enviado":[],"heartbeat_enviado":False,"primera_alerta_hora":{},
-                    "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,"count":0}
+                    "actualizaciones_hoy":{},"sin_coincidencias_enviado":False,
+                "fondito_chequeado_hoy":False,"count":0}
         # Compatibilidad con versiones anteriores
         if "largo_enviado" not in e:
             e["largo_enviado"] = list(e.get("alertados",[]))
@@ -116,6 +110,8 @@ def cargar_estado():
             e["ts_ultimo_mensaje"] = 0
         if "festivo_enviado" not in e:
             e["festivo_enviado"] = False
+        if "fondito_chequeado_hoy" not in e:
+            e["fondito_chequeado_hoy"] = False
         if "mensajes_hoy" not in e:
             e["mensajes_hoy"] = 0
         return e
@@ -429,6 +425,20 @@ UNIVERSO_CURADO = [
     "COIN","HOOD","MSTR","SMLR",
     # ── WATCHLIST PERSONAL LU ─────────────────────────────────
     "DAR","GDX","GOAU","HIMS","EW","IBIT","WPM",
+    # ── v8: ESPACIAL / SpaceX proxy ───────────────────────────
+    "RKLB","ASTS","LUNR","MNTS","RDW","AXON",
+    # ── v8: NUCLEAR / Uranio ──────────────────────────────────
+    "CCJ","NNE","UEC","DNN","LEU","UUUU","OKLO","VST","CEG",
+    # ── v8: HOMEBUILDERS ──────────────────────────────────────
+    "DHI","LEN","PHM","TOL","KBH","MDC","NVR","SKY","MHO","TMHC",
+    # ── v8: AI INFRAESTRUCTURA ────────────────────────────────
+    "VRT","CDNS","ANET","COHR","BE","POWL",
+    # ── v8: DEFENSA MODERNA ───────────────────────────────────
+    "LDOS","CACI","BAH","SAIC","TDG","HWM","CW","BWXT",
+    # ── v8: GLP-1 / VIDA NUEVA ────────────────────────────────
+    "VKTX","RVNC","CELH","CAVA",
+    # ── v8: CONSUMO RESILIENTE ────────────────────────────────
+    "BROS","SG","WING","TXRH",
 ]
 
 def _tv_screener(max_tickers=300):
@@ -522,10 +532,40 @@ def obtener_universo():
         if t not in universo:
             universo.append(t); añadidos_fv += 1
 
+    # Fuente dinámica 3: S&P 500 (auto-descarga de Wikipedia cada semana)
+    añadidos_sp = 0
+    try:
+        sp500_df = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            attrs={"id": "constituents"}
+        )[0]
+        sp500_tickers = sp500_df["Symbol"].str.replace(".", "-").tolist()
+        for t in sp500_tickers:
+            if t not in universo and len(t) <= 5:
+                universo.append(t); añadidos_sp += 1
+        print(f"  S&P 500 auto: +{añadidos_sp} tickers")
+    except Exception as ex:
+        print(f"  S&P 500 no disponible: {ex}")
+
+    # Fuente 4: top movers del día (gappers y activos)
+    añadidos_movers = 0
+    try:
+        trending_tickers = [
+            "GME","AMC","BBBY","SOUN","NVTS","WULF","APLD","LUNR",
+            "RKLB","ASTS","SMR","OKLO","NNE","KTOS","CELH","CAVA",
+            "HOOD","MSTR","COIN","RIOT","MARA",
+        ]
+        for t in trending_tickers:
+            if t not in universo:
+                universo.append(t); añadidos_movers += 1
+    except:
+        pass
+
     resultado = universo[:CONFIG["max_tickers_scan"]]
     print(f"Universo total: {len(resultado)} tickers "
           f"(curado: {len(UNIVERSO_CURADO)}, "
-          f"TV: +{añadidos_tv}, Finviz: +{añadidos_fv})")
+          f"TV: +{añadidos_tv}, Finviz: +{añadidos_fv}, "
+          f"SP500: +{añadidos_sp}, movers: +{añadidos_movers})")
     return resultado
 
 
@@ -608,144 +648,6 @@ def detectar_velas(hist):
     except:
         return "Error calculando velas",0
 
-# ─────────────────────────────────────────────────────────────
-#  MEJORAS v7.2 — Price Action & Estructura
-# ─────────────────────────────────────────────────────────────
-
-def clasificar_entorno(hist, adx_v, sma8v, precio):
-    """
-    Clasifica el entorno actual: Momentum, MeanReversion, Chop o Recuperación.
-    Basado en: cuerpos vs mechas de las últimas 5 velas + ADX + posición vs SMA8.
-    KoroushAK: solo hay dos estilos — Momentum (continuación) y Mean Reversion (rechazo).
-    """
-    try:
-        if len(hist) < 5:
-            return "N/D", "nd"
-        o = hist["Open"].values[-5:]
-        h = hist["High"].values[-5:]
-        c = hist["Close"].values[-5:]
-        l = hist["Low"].values[-5:]
-
-        cuerpos    = [abs(c[i] - o[i]) for i in range(5)]
-        rangos     = [(h[i] - l[i]) if h[i] > l[i] else 0.001 for i in range(5)]
-        mechas_inf = [min(o[i], c[i]) - l[i] for i in range(5)]
-        ratio_body = [cuerpos[i] / rangos[i] for i in range(5)]
-
-        pct_momentum = sum(1 for r in ratio_body if r > 0.60) / 5   # cuerpos grandes
-        pct_wicks    = sum(1 for i in range(5) if mechas_inf[i] > rangos[i] * 0.40) / 5
-        alcistas     = sum(1 for i in range(5) if c[i] > o[i])
-        pct_sobre_s8 = (precio - sma8v) / sma8v * 100 if sma8v and sma8v > 0 else 0
-
-        # Escalera grind alcista (KoroushAK) — momentum más fiable
-        if pct_momentum >= 0.6 and alcistas >= 4 and (adx_v or 0) >= 22:
-            return "🚀 Momentum fuerte", "momentum"
-        elif pct_momentum >= 0.4 and alcistas >= 3:
-            return "📈 Momentum moderado", "momentum"
-        elif pct_wicks >= 0.4 and pct_sobre_s8 <= 2.0:
-            return "🔄 Mean Reversion en nivel", "mean_reversion"
-        elif pct_momentum < 0.3 and pct_wicks < 0.3:
-            return "↔️ Chop — precaución", "chop"
-        else:
-            return "🟡 Recuperación", "recuperacion"
-    except:
-        return "N/D", "nd"
-
-
-def detectar_estructura_hh_hl(hist, lookback=10):
-    """
-    Detecta si el precio está haciendo Higher Highs / Higher Lows.
-    Murphy AT: la tendencia alcista se define por HH y HL consecutivos.
-    Lookback: últimas 10 velas para detectar máximos y mínimos locales.
-    """
-    try:
-        if len(hist) < lookback:
-            return True, "Sin datos estructura"
-        highs = hist["High"].iloc[-lookback:].values
-        lows  = hist["Low"].iloc[-lookback:].values
-
-        maximos = [highs[i] for i in range(1, len(highs) - 1)
-                   if highs[i] > highs[i-1] and highs[i] > highs[i+1]]
-        minimos = [lows[i] for i in range(1, len(lows) - 1)
-                   if lows[i] < lows[i-1] and lows[i] < lows[i+1]]
-
-        if len(maximos) >= 2 and len(minimos) >= 2:
-            hh = maximos[-1] > maximos[-2]
-            hl = minimos[-1] > minimos[-2]
-            if hh and hl:
-                return True,  "✅ HH/HL confirmado"
-            elif hh:
-                return True,  "⚠️ Higher High (HL pendiente)"
-            elif hl:
-                return False, "🟡 Higher Low (LH reciente — vigilar)"
-            else:
-                return False, "❌ LH/LL — estructura bajista"
-        return True, "Estructura neutral (datos insuf.)"
-    except:
-        return True, "Sin datos estructura"
-
-
-def detectar_gap(precio, prev):
-    """
-    Linda Raschke: gaps grandes tienen mayor probabilidad de continuación.
-    No hacer fade de gaps fuertes — buscar continuación.
-    """
-    try:
-        if prev <= 0:
-            return False, "", "sin_gap"
-        pct_gap = (precio - prev) / prev * 100
-        if pct_gap >= 2.0:
-            return True, f"🚀 Gap alcista fuerte +{pct_gap:.1f}% (Raschke: continuación)", "fuerte"
-        elif pct_gap >= 0.5:
-            return True, f"📈 Gap moderado +{pct_gap:.1f}%", "moderado"
-        else:
-            return False, "", "sin_gap"
-    except:
-        return False, "", "sin_gap"
-
-
-def clasificar_vela_4h(ticker):
-    """
-    Descarga datos 1H y construye la vela 4H activa.
-    L2WTrades: la vela 4H determina si tu trade funcionará.
-    Expansión (cuerpo grande, dirección correcta) → setups limpios.
-    Consolidación/Chop → ruido, evitar entradas.
-    """
-    try:
-        hist_1h = yf.Ticker(ticker).history(period="5d", interval="1h")
-        if hist_1h.empty or len(hist_1h) < 4:
-            return "sin_datos", "Sin datos 4H"
-
-        # Vela 4H = últimas 4 velas de 1h disponibles
-        vela_o = float(hist_1h["Open"].iloc[-4])
-        vela_c = float(hist_1h["Close"].iloc[-1])
-        vela_h = float(hist_1h["High"].iloc[-4:].max())
-        vela_l = float(hist_1h["Low"].iloc[-4:].min())
-
-        rango  = vela_h - vela_l
-        if rango == 0:
-            return "consolidacion", "📊 Rango 4H = 0 — sin movimiento"
-
-        cuerpo    = abs(vela_c - vela_o)
-        mecha_inf = min(vela_o, vela_c) - vela_l
-        ratio     = cuerpo / rango
-        alcista   = vela_c > vela_o
-
-        if ratio >= 0.60 and alcista:
-            return "expansion", f"✅ Expansión 4H alcista (cuerpo {ratio:.0%})"
-        elif ratio >= 0.40 and alcista:
-            return "expansion_mod", f"🟡 Expansión 4H moderada (cuerpo {ratio:.0%})"
-        elif ratio < 0.25:
-            return "consolidacion", f"⚠️ Consolidación 4H (cuerpo {ratio:.0%}) — posible ruido"
-        elif mecha_inf > rango * 0.45 and alcista:
-            return "retracement", f"🔄 Retroceso 4H con soporte (mecha inf.)"
-        elif not alcista:
-            return "reversion", f"🔴 Vela 4H bajista — vigilar cierre"
-        else:
-            return "neutral", f"🟡 Vela 4H neutral"
-    except Exception as ex:
-        return "error", f"Error 4H: {str(ex)[:40]}"
-
-
 def check_earnings_proximos(ticker):
     try:
         cal=yf.Ticker(ticker).calendar
@@ -809,14 +711,6 @@ def obtener_datos(ticker):
             ath_52w = float(h.iloc[-252:].max()) if len(h)>=252 else float(h.max())
         mv,sv,hv_m,me=calc_macd(c); av,dip,dim,ae=calc_adx(h,l,c)
         atr_val=calc_atr(h,l,c); vela_patron,vela_fuerza=detectar_velas(hist)
-
-        # ── v7.2: nuevos campos de Price Action ─────────────────
-        sma8v_raw = sma(c, 8)
-        entorno_txt, entorno_tipo = clasificar_entorno(hist, av, sma8v_raw, precio)
-        hh_hl_ok, hh_hl_txt      = detectar_estructura_hh_hl(hist)
-        gap_ok, gap_txt, gap_tipo = detectar_gap(precio, prev)
-        # ────────────────────────────────────────────────────────
-
         nombre=ticker; sector="N/A"; beta=None
         try:
             info=s.info
@@ -832,12 +726,7 @@ def obtener_datos(ticker):
                 "adx":av,"dip":dip,"dim":dim,"adx_e":ae,"atr":atr_val,
                 "beta":beta,
                 "vh":vh,"vh_proy":vh_proy,"vp":vp,"vol_r":vol_r,"ath_52w":ath_52w,
-                "vela_patron":vela_patron,"vela_fuerza":vela_fuerza,
-                # v7.2 — Price Action fields
-                "entorno_txt":entorno_txt,"entorno_tipo":entorno_tipo,
-                "hh_hl_ok":hh_hl_ok,"hh_hl_txt":hh_hl_txt,
-                "gap_ok":gap_ok,"gap_txt":gap_txt,"gap_tipo":gap_tipo,
-                "error":None}
+                "vela_patron":vela_patron,"vela_fuerza":vela_fuerza,"error":None}
     except Exception as ex:
         return {"ticker":ticker,"error":str(ex)}
 
@@ -867,31 +756,11 @@ def analizar(d):
     elif vol_r>=1.0:      pts_vol = 8
     elif vol_r>=0.8:      pts_vol = 4
     else:                 pts_vol = 0   # vol bajo — sin puntos
-    pts_vela=int(d.get("vela_fuerza",0)*0.10)   # max 9 pts (90×0.10)
-
-    # ── v7.2: nuevos componentes Price Action ──────────────────
-    # Entorno (KoroushAK): momentum suma, chop no suma — el entorno SÍ importa
-    entorno_tipo = d.get("entorno_tipo", "nd")
-    pts_entorno = (10 if entorno_tipo == "momentum"
-                   else 8 if entorno_tipo == "mean_reversion"
-                   else 4 if entorno_tipo == "recuperacion"
-                   else 0)   # chop o nd = 0
-
-    # Estructura HH/HL (Murphy): mercado en tendencia alcista confirmada
-    pts_hh_hl = 5 if d.get("hh_hl_ok", True) else 0
-
-    # Gap (Raschke): gap alcista → mayor probabilidad de continuación
-    gap_tipo = d.get("gap_tipo", "sin_gap")
-    pts_gap = (8 if gap_tipo == "fuerte" else 4 if gap_tipo == "moderado" else 0)
-    # ───────────────────────────────────────────────────────────
-
-    score=min(100, pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela+pts_entorno+pts_hh_hl+pts_gap)
+    pts_vela=int(d.get("vela_fuerza",0)*0.15)
+    score=min(100,pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela)
     return {"fan":fan,"c1":c1,"c2":c2,"c3":c3,"c4":c4,
             "en_rango":en_rango,"vol_r":vol_r,"vol_ok":vol_ok,"senal_tardia":tardia,
-            "score":score,
-            "score_det":(f"Fan:{pts_fan}+RSI:{pts_rsi}+ADX:{pts_adx}+"
-                         f"Vol:{pts_vol}+Vela:{pts_vela}+"
-                         f"Entorno:{pts_entorno}+HH/HL:{pts_hh_hl}+Gap:{pts_gap}")}
+            "score":score,"score_det":f"Fan:{pts_fan}+RSI:{pts_rsi}+ADX:{pts_adx}+Vol:{pts_vol}+Vela:{pts_vela}"}
 
 def posicion(precio, ath_52w=None, atr=None, beta=None):
     """
@@ -918,15 +787,17 @@ def posicion(precio, ath_52w=None, atr=None, beta=None):
     acc = max(1, int(CONFIG["riesgo_fijo_usd"] / rx))
     tot = round(acc*precio, 2)
     perd= round(acc*rx, 2)
-    t1  = round(precio + 1*rx, 2)
-    t2  = round(precio + 2*rx, 2)
-    t3  = round(precio + 3*rx, 2)
+    # v8: T1=1.5R → 40% pos → stop BE | T2=2.5R → 35% | T3=4R runner EMA8
+    t1  = round(precio + 1.5*rx, 2)
+    t2  = round(precio + 2.5*rx, 2)
+    t3  = round(precio + 4.0*rx, 2)
     if ath_52w and ath_52w > precio:
         techo = round(ath_52w*0.98, 2)
         if techo > t1:
             if t2 > techo: t2 = techo
             if t3 > techo: t3 = techo
-    rr = round((t1-precio)/rx, 2)
+    # R/R real calculado sobre T2 (Minervini/Van Tharp — no sobre T1)
+    rr = round((t2-precio)/rx, 2)
     return {"acc":acc,"tot":tot,"stop":stop,"perd":perd,
             "t1":t1,"t2":t2,"t3":t3,"rx":rx,"rr":rr}
 
@@ -1079,139 +950,83 @@ def calcular_prioridad(a, ia, d):
     else:
         return "🔭", "INFORMATIVA — observa"
 
-def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal):
-    hora   = hora_et(); pm_tag=" [PRE-MARKET]" if d.get("es_pm") else ""
+def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal, noticia_av=None, sector_boost=0, tema=None):
+    hora   = hora_et()
+    pm_tag = " [PRE-MKTG]" if d.get("es_pm") else ""
     rsi_v  = d["rsi"] if d["rsi"] else 0
+    vol_r  = a["vol_r"]
+    score  = a.get("score", 0)
+    adx_v  = d["adx"] if d["adx"] else 0
     atr_v  = d["atr"] if d["atr"] else 0
     atr_pct= round(atr_v/d["precio"]*100,1) if d["precio"]>0 else 0
-    rsi_tag= ("débil" if rsi_v<CONFIG["rsi_min"]
-              else "sobrecomprado" if rsi_v>CONFIG["rsi_max"] else "OK")
-    vol_r   = a["vol_r"]
-    tardia_v = "\n⚠️ precio extendido &gt;2% sobre SMA8" if a.get("senal_tardia") else ""
-    p1,p2,p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, vol_r)
-    acc = pos["acc"]
-    s25 = max(1,round(acc*0.25)); s30=max(1,round(acc*0.30))
-    s20x= max(1,round(acc*0.20)); s25b=max(0,acc-s25-s30-s20x)
-    ath   = d.get("ath_52w", 0) or 0
-    ath_h = d.get("ath_hist", 0) or 0
-    dist_ath = (f"ATH 52s: {ath:.2f}  (-{((ath-d['precio'])/ath*100):.1f}%)"
-                if ath > d["precio"] else f"ATH 52s: {ath:.2f}  (zona ATH)")
-    if ath_h and ath_h > ath:
-        dist_ath += f" | Hist: {ath_h:.2f} (-{((ath_h-d['precio'])/ath_h*100):.1f}%)"
-    etf_ref  = get_sector_etf(d.get("sector","N/A"))
-    ia_ico   = "⭐" if ia["prob"]>=70 else "🔔" if ia["prob"]>=55 else "🔭"
-    score    = a.get("score",0)
-    barra    = "█"*int(score/10)+"░"*(10-int(score/10))
+    etf_ref= get_sector_etf(d.get("sector","N/A"))
+    ath    = d.get("ath_52w", 0) or 0
+    dist_ath = round((ath - d["precio"]) / ath * 100, 1) if ath > d["precio"] else 0
+    rsi_ico = "🟢" if 45<=rsi_v<=58 else "🟡" if rsi_v<=65 else "🔴"
+    adx_ico = "🟢" if adx_v>=25 else "🟡" if adx_v>=20 else "🔴"
+    vol_ico = "🔥" if vol_r>=1.5 else "✅" if vol_r>=0.8 else "⚠️"
+    macd_ico= "🟢" if "Bull" in d["macd_e"] else "🔴"
+    fan_icons = "".join(["✅" if i < a["fan"] else "❌" for i in range(4)])
     prio_ico, prio_txt = calcular_prioridad(a, ia, d)
-
-    def esc(t): return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-    ctx   = esc(ia.get("contexto","N/D"))
-    razon = esc(ia.get("razon",""))
-    alerta= esc(ia.get("alerta",""))
-
-    # ── Semáforos — emoji SIEMPRE al inicio de línea ─────────
-    # MACD
-    macd_ico = "🟢" if "Bull" in d["macd_e"] else "🔴"
-
-    # RSI — zona óptima 50-65
-    if 50 <= rsi_v <= 65:    rsi_ico = "🟢"
-    elif 45 <= rsi_v <= 72:  rsi_ico = "🟡"
-    else:                     rsi_ico = "🔴"
-
-    # ADX — fuerza de tendencia
-    adx_v = d["adx"] if d["adx"] else 0
-    if adx_v >= 25:    adx_ico = "🟢"
-    elif adx_v >= 20:  adx_ico = "🟡"
-    else:               adx_ico = "🔴"
-
-    # ATR — volatilidad diaria
-    if atr_pct < 2.0:    atr_ico = "🟢"; atr_tag = "baja volatilidad"
-    elif atr_pct <= 4.0: atr_ico = "🟡"; atr_tag = "volatilidad media"
-    else:                atr_ico = "🔴"; atr_tag = "alta — reduce tamaño"
-
-    # Volumen
-    if vol_r >= 1.5:    vol_ico = "🟢"; vol_tag = f"ALTO — {vol_r:.1f}x"
-    elif vol_r >= 0.8:  vol_ico = "🟡"; vol_tag = f"normal — {vol_r:.1f}x"
-    else:                vol_ico = "🔴"; vol_tag = f"BAJO — {vol_r:.1f}x"
-
-    return (
-        f"{prio_ico} <b>SISTEMA SIRIO — {prio_txt}</b>\n"
-        f"🌟 <b>Solares Trading</b>\n"
-        f"🕐 {hora}{pm_tag}\n"
-        f"📈 Swing DIARIO 5-10 días\n\n"
-
-        f"<b>{d['ticker']}</b>  {d.get('nombre','')}\n"
-        f"🏭 Sector: {d.get('sector','N/A')}  |  Ref: <b>{etf_ref}</b>\n"
-        f"💲 {d['precio']:.2f} USD  ({d['pct']:+.1f}%){tardia_v}\n"
-        f"🏔 {dist_ath}\n\n"
-
-        f"<b>📊 Abanico SMA {a['fan']}/4</b>\n"
-        f"{'✅' if a['c1'] else '❌'} Precio &gt; SMA200  {d['sma200']:.2f}\n"
-        f"{'✅' if a['c2'] else '❌'} SMA50  &gt; SMA200  {d['sma50']:.2f}\n"
-        f"{'✅' if a['c3'] else '❌'} SMA20  &gt; SMA50   {d['sma20']:.2f}\n"
-        f"{'✅' if a['c4'] else '❌'} Precio &gt; SMA20   {d['sma20']:.2f}\n\n"
-
-        f"<b>🧭 Price Action</b>\n"
-        f"Entorno: {d.get('entorno_txt','N/D')}\n"
-        f"Estructura: {d.get('hh_hl_txt','Sin datos')}\n"
-        + (f"📊 {d.get('gap_txt','')}\n" if d.get('gap_ok') else "")
-        + "\n"
-
-        f"<b>📏 Indicadores</b>\n"
-        f"{macd_ico} MACD: {d['macd_e']}\n"
-        f"{rsi_ico} RSI:   {rsi_v:.0f}  ({rsi_tag})\n"
-        f"{adx_ico} ADX:   {d['adx_e']} ({adx_v:.0f})\n"
-        f"{atr_ico} ATR:   {atr_pct}%  ({atr_tag})\n"
-        f"{vol_ico} Vol:   {vol_tag}\n"
-        f"<i>(vs promedio últimos 20 días)</i>\n\n"
-
-        f"<b>{d.get('vela_patron','Sin patrón')}</b>\n"
-        f"<i>Fuerza de la vela: {d.get('vela_fuerza',0)}%</i>\n\n"
-
-        f"<b>📈 Tendencia semanal</b>\n{tendencia_semanal}\n\n"
-
-        + (f"<b>📰 Noticias y Sentiment</b>\n{sent_texto}\n\n" if sent_texto else "")
-
-        + f"<b>🎯 Score Sistema Sirio: {score}/100</b>\n"
-        f"<code>{barra}</code>\n"
-        f"<i>{a.get('score_det','')}</i>\n\n"
-
-        f"<b>💰 Posición</b>\n"
-        f"Entrada: {d['precio']:.2f} USD  |  <b>{pos['acc']} acc</b>  |  Capital: {pos['tot']:.0f} USD\n"
-        f"🛑 Stop:    {pos['stop']:.2f}  (-6% / -1R)\n"
-        f"🎯 T1:      {pos['t1']:.2f}  (+{((pos['t1']/d['precio'])-1)*100:.1f}%)\n"
-        f"🎯 T2:      {pos['t2']:.2f}  (+{((pos['t2']/d['precio'])-1)*100:.1f}%)\n"
-        f"🎯 T3:      {pos['t3']:.2f}  (+{((pos['t3']/d['precio'])-1)*100:.1f}%)\n"
-        f"🚀 Runner:  trail EMA8\n"
-        f"R/R: {pos['rr']:.1f}x  |  Riesgo: {pos['perd']:.0f} USD\n\n"
-
-        f"<b>🗓 Gestión de Salida — Sistema Sirio</b>\n"
-        f"25%({s25}) T1  |  30%({s30}) T2  |  20%({s20x}) T3  |  25%({s25b}) trail\n"
-        f"⏱ Time-stop: 7 días sin T1 → salida total\n\n"
-
-        f"<b>📊 Probabilidades</b>\n"
-        f"T1: {p1}%  |  T2: {p2}%  |  T3: {p3}%\n\n"
-
-        # Sección IA — solo si no hubo error
-        + (
-            f"<b>{ia_ico} IA {ia['prob']}% — {ia['senal']}</b>\n"
-            + (f"🌍 {ctx}\n" if ctx else "")
-            + (f"📐 {razon}\n" if razon else "")
-            + (f"👁 Vigilar: {alerta}\n" if alerta else "")
-            + "\n"
-            if ia.get("senal") not in ("ERROR", "SIN IA", "")
-            else f"<b>🤖 IA</b> — <i>análisis no disponible en esta señal</i>\n\n"
-        )
-
-        + f"<i>Sistema Sirio v7.2 — Solares</i> 🌟\n"
-        f"─────────────────────────────────\n"
-        f"⚠️ <i>AVISO LEGAL: Esta información tiene carácter "
-        f"exclusivamente educativo e informativo. No constituye "
-        f"asesoramiento financiero ni recomendación de inversión. "
-        f"Los mercados implican riesgo de pérdida de capital. "
-        f"Cada persona es responsable de sus propias decisiones. "
-        f"Solares no gestiona fondos de terceros.</i>"
-    )
+    ia_ico  = "⭐" if ia["prob"]>=70 else "🔔" if ia["prob"]>=55 else "🔭"
+    ia_senal_txt = ia.get("senal","")
+    ia_alerta = ia.get("alerta","")
+    def esc(t): return (t or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    tema_txt = f" · 🎯 {tema.upper()}" if tema else ""
+    # ── BLOQUE 1 ──────────────────────────────────────────────
+    b1  = f"{prio_ico} <b>SIRIO v8 · {prio_txt}</b>\n"
+    b1 += f"🕐 {hora}{pm_tag}\n\n"
+    b1 += f"<b>{d['ticker']}</b>  {d.get('nombre','')}\n"
+    b1 += f"🏭 {d.get('sector','N/A')} · {etf_ref}{tema_txt}\n"
+    b1 += f"💲 ${d['precio']:.2f} ({d['pct']:+.1f}%)\n"
+    b1 += f"🏔 ATH -{dist_ath:.1f}% libre · Espacio ✅\n\n"
+    b1 += f"<b>Abanico SMA {a['fan']}/4</b>  {fan_icons}\n"
+    b1 += f"<b>Puntuación: {score}/100</b>\n\n"
+    b1 += f"{rsi_ico} RSI {rsi_v:.0f}  ·  {adx_ico} ADX {adx_v:.0f}  ·  {vol_ico} Vol {vol_r:.1f}x  ·  {macd_ico} MACD {d['macd_e']}\n"
+    b1 += f"📐 ATR {atr_pct:.1f}%  ·  {d.get('entorno_txt','')}\n"
+    b1 += f"🕯 {esc(d.get('vela_patron','Sin patrón'))}\n\n"
+    b1 += f"<b>💰 Posición</b>\n"
+    b1 += f"{pos['acc']} acc · ${pos['tot']:.0f} · Riesgo ${pos['perd']:.0f}\n"
+    b1 += f"🛑 Stop ${pos['stop']:.2f}\n"
+    b1 += f"🎯 T1 ${pos['t1']:.2f} (+{((pos['t1']/d['precio'])-1)*100:.1f}%) · 40%\n"
+    b1 += f"🎯 T2 ${pos['t2']:.2f} (+{((pos['t2']/d['precio'])-1)*100:.1f}%) · 35%\n"
+    b1 += f"🏃 T3 ${pos['t3']:.2f} trailing EMA8 · 25%\n"
+    b1 += f"R/R real: <b>{pos['rr']:.1f}x</b>  ·  ⏱ Time-stop 7 días\n\n"
+    b1 += f"{ia_ico} <b>IA {ia['prob']}% → {esc(ia_senal_txt)}</b>\n"
+    if ia_alerta:
+        b1 += f"👁 Vigilar: {esc(ia_alerta)}\n"
+    if noticia_av:
+        b1 += f"\n📰 {esc(noticia_av)}\n"
+    b1 += f"\n<i>Sirio v8 · Solares 🌟</i>"
+    # ── BLOQUE 2 — solo si score >= 75 o IA=ENTRAR ───────────
+    enviar_bloque2 = score >= 75 or "ENTRAR" in ia_senal_txt.upper()
+    bloque2 = None
+    if enviar_bloque2:
+        p1, p2, p3 = calc_probabilidades(a["fan"], d["adx"], rsi_v, vol_r)
+        acc = pos["acc"]
+        s40 = max(1, round(acc*0.40))
+        s35 = max(1, round(acc*0.35))
+        s25 = max(0, acc - s40 - s35)
+        ctx   = esc(ia.get("contexto",""))
+        razon = esc(ia.get("razon",""))
+        b2  = f"📋 <b>{d['ticker']} · Detalle completo</b>\n"
+        b2 += f"🕐 {hora}\n\n"
+        if sent_texto:
+            b2 += f"<b>📰 Sentimiento</b>\n{sent_texto}\n\n"
+        b2 += f"<b>Tendencia semanal</b>\n{tendencia_semanal}\n\n"
+        b2 += f"<b>Estructura precio</b>\n{d.get('hh_hl_txt','')}\n"
+        if d.get('gap_ok'):
+            b2 += f"📊 {esc(d.get('gap_txt',''))}\n"
+        b2 += f"\n<b>Probabilidades</b>\nT1: {p1}%  ·  T2: {p2}%  ·  T3: {p3}%\n\n"
+        b2 += f"<b>Gestión de salida</b>\n"
+        b2 += f"40% ({s40} acc) → T1 ${pos['t1']:.2f} → stop a costo\n"
+        b2 += f"35% ({s35} acc) → T2 ${pos['t2']:.2f}\n"
+        b2 += f"25% ({s25} acc) → trailing EMA8\n\n"
+        if ctx:
+            b2 += f"<b>IA contexto</b>\n🌍 {ctx}\n📐 {razon}\n\n"
+        b2 += f"<i>Sirio v8 · Solares 🌟</i>"
+        bloque2 = b2
+    return b1, bloque2
 
 def build_msg_corto(d, a, pos, ia, tendencia_semanal, dist_s8=None):
     """
@@ -1268,7 +1083,7 @@ def build_msg_corto(d, a, pos, ia, tendencia_semanal, dist_s8=None):
         f"🛑 Stop: {pos['stop']:.2f}  |  🎯 T1: {pos['t1']:.2f}  |  T2: {pos['t2']:.2f}\n\n"
 
         f"<i>Mensaje completo ya fue enviado hoy — este es el seguimiento.\n"
-        f"Sistema Sirio v7 — Solares</i> 🌟"
+        f"Sirio v8 — Solares</i> 🌟"
     )
 
 
@@ -1294,7 +1109,6 @@ def verificar_señal_activa(ticker):
     """
     Re-verifica si una señal del día sigue válida para el resumen 4H.
     Activa = fan 4/4 + precio ≤ 3% sobre SMA8 + MACD alcista.
-    v7.2: incluye clasificación de vela 4H (L2WTrades).
     """
     try:
         hist = yf.Ticker(ticker).history(period="60d", interval="1d")
@@ -1304,19 +1118,15 @@ def verificar_señal_activa(ticker):
         sma8v   = sma(c, 8);  sma20v = sma(c, 20)
         sma50v  = sma(c, 50); sma200v= sma(c, 200)
         if not all([sma8v, sma20v, sma50v, sma200v]): return None
+        # Fan consistente con analizar() — SMAs clave: 200, 50, 20
         fan     = sum([precio>sma200v, sma50v>sma200v, sma20v>sma50v, precio>sma20v])
         pct_s8  = (precio-sma8v)/sma8v*100
         rsi_v   = calc_rsi(c)
         _,_,_,macd_e = calc_macd(c)
-
-        # v7.2: fase de la vela 4H actual
-        fase_4h, fase_4h_txt = clasificar_vela_4h(ticker)
-
         return {
             "precio": round(precio,2), "sma8": round(sma8v,2),
             "fan": fan, "pct_s8": round(pct_s8,1),
             "macd": macd_e, "rsi": round(rsi_v,0) if rsi_v else 0,
-            "fase_4h": fase_4h, "fase_4h_txt": fase_4h_txt,
             "activa": fan==4 and pct_s8<=3.0 and "Bull" in macd_e
         }
     except:
@@ -1375,22 +1185,14 @@ def enviar_resumen_4h(estado):
         # Solo llega aquí si hay señales que SIGUEN activas
         lines = []
         for t, v in activas:
-            dist     = f"+{v['pct_s8']:.1f}% SMA8" if v['pct_s8'] > 0 else "en SMA8"
-            fase_txt = v.get("fase_4h_txt", "")
-            fase_ico = ("✅" if v.get("fase_4h") in ("expansion","expansion_mod")
-                        else "⚠️" if v.get("fase_4h") in ("consolidacion","neutral")
-                        else "🔴" if v.get("fase_4h") == "reversion"
-                        else "🔄")
-            lines.append(
-                f"  ✅ <b>{t}</b> · ${v['precio']} · RSI {v['rsi']} · {dist}\n"
-                f"  {fase_ico} 4H: {fase_txt}"
-            )
+            dist = f"+{v['pct_s8']:.1f}% SMA8" if v['pct_s8'] > 0 else "en SMA8"
+            lines.append(f"  ✅ <b>{t}</b> · ${v['precio']} · RSI {v['rsi']} · {dist}")
 
         send_telegram(
             f"🔄 <b>Sirio — señal sigue activa</b>\n"
             f"🕐 {hora_et()}\n\n"
             + "\n".join(lines)
-            + f"\n\n<i>Sistema Sirio v7.2 — Solares</i> 🌟"
+            + f"\n\n<i>Sirio v8 — Solares</i> 🌟"
         )
         enviados.append(clave)
         estado["resumen_4h"] = enviados
@@ -1401,12 +1203,31 @@ def enviar_resumen_4h(estado):
 
 def main():
     print(f"\n{'='*55}")
-    print(f"  SISTEMA SIRIO — Solares v7   {hora_et()}")
+    print(f"  SISTEMA SIRIO — Solares v7.3 {hora_et()}")
     print(f"{'='*55}\n")
 
     estado  = cargar_estado()
     ya      = estado.get("alertados", [])
     count   = estado.get("count", 0)
+
+    # v8: sector momentum al inicio del run
+    sectores_activos = {}
+    try:
+        sectores_activos = analizar_sector_etfs()
+    except Exception as ex:
+        print(f"  [SECTORES] Error: {ex}")
+
+    # v8: fondito monitor (1 vez al día, primer run)
+    if not estado.get("fondito_chequeado_hoy", False):
+        try:
+            msg_fondito = fondito_monitor()
+            if msg_fondito:
+                ok_f = send_telegram(msg_fondito)
+                if ok_f:
+                    estado["fondito_chequeado_hoy"] = True
+                    guardar_estado(estado)
+        except Exception as ex:
+            print(f"  [FONDITO] Error: {ex}")
 
     ahora_et  = datetime.now(ET)
     hora_act  = ahora_et.hour
@@ -1421,7 +1242,7 @@ def main():
                 f"🕐 {hora_et()}\n\n"
                 f"🏛 <b>{nombre_festivo}</b> — NYSE cerrado hoy\n"
                 f"Sirio no escaneará. Próximo día hábil activo.\n\n"
-                f"<i>Sistema Sirio v7 — Solares</i> 🌟"
+                f"<i>Sirio v8 — Solares</i> 🌟"
             )
             if ok_f:
                 estado["festivo_enviado"] = True
@@ -1468,10 +1289,6 @@ def main():
         rsi_s = f"{d['rsi']:.0f}" if d["rsi"] else "N/A"
         print(f"{d['precio']:.2f} RSI:{rsi_s} MACD:{d['macd_e']} [{d.get('sector','?')[:10]}]")
         a = analizar(d)
-
-        # v7.2: trackear entorno chop para el status periódico
-        if d.get("entorno_tipo") == "chop":
-            razones["chop"] = razones.get("chop", 0) + 1
 
         # ── PASO 1 OBLIGATORIO: precio SOBRE SMA200 — veto absoluto ──────
         # Regla Lu: sin esta condición NO hay entrada. Gate previo a cualquier score.
@@ -1530,7 +1347,7 @@ def main():
         ath_v = d.get("ath_52w", 0)
         if ath_v and ath_v > 0 and d["precio"] > 0:
             dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
-            if dist_ath_pct < 20.0:   # incluye negativo (en ATH o por encima)
+            if dist_ath_pct < 10.0:   # incluye negativo (en ATH o por encima) — v7.3: bajado de 20% a 10%
                 print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% del maximo 52s "
                       f"({ath_v:.2f}) — necesita >=20% de espacio")
                 razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
@@ -1543,8 +1360,8 @@ def main():
         sma8v    = d.get("sma8") or 0
         dist_s8  = ((d["precio"] - sma8v) / sma8v * 100) if sma8v > 0 else 0
 
-        if dist_s8 > 2.0:
-            print(f"    skip señal: extendida {dist_s8:.1f}% sobre SMA8 — sin entrada")
+        if dist_s8 > 3.5:
+            print(f"    skip señal: extendida {dist_s8:.1f}% sobre SMA8 (max 3.5%) — sin entrada")
             razones["extendida"] = razones.get("extendida", 0) + 1
             continue
 
@@ -1581,17 +1398,31 @@ def main():
         ia  = analizar_ia(d, a, pos, sc_sent, tend_sem, noticias_yh)
         print(f"     IA: {ia['prob']}% — {ia['senal']}")
 
-        if es_repetido:
-            msg = build_msg_corto(d, a, pos, ia, tend_sem, dist_s8)
-        elif es_fan3:
-            # Fan 3/4: señal OBSERVAR — misma estructura pero con aviso claro
-            msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
-            aviso = "\U0001f52d <b>[OBSERVAR \u2014 Fan 3/4]</b> Estructura incompleta. Esperar cierre vela y confirmar SMA faltante.\n\n"
-            msg = aviso + msg
-        else:
-            msg = build_msg(d, a, pos, ia, txt_sent, tend_sem)
+        # v8: obtener noticia Alpha Vantage (solo para señales confirmadas)
+        noticia_av = _av_noticia(ticker) if AV_KEY else None
+        # v8: boost sector
+        s_boost = boost_sector(ticker, sectores_activos) if sectores_activos else 0
+        a["score"] = min(100, a["score"] + s_boost)
+        if s_boost > 0:
+            a["score_det"] += f"+Sector:{s_boost}"
+        tema_ticker = detectar_tema(ticker)
 
-        ok = send_telegram(msg)
+        if es_repetido:
+            msg_principal = build_msg_corto(d, a, pos, ia, tend_sem, dist_s8)
+            ok = send_telegram(msg_principal)
+        elif es_fan3:
+            bloque1, bloque2 = build_msg(d, a, pos, ia, txt_sent, tend_sem, noticia_av, s_boost, tema_ticker)
+            aviso = "\U0001f52d <b>[OBSERVAR — Fan 3/4]</b> Estructura incompleta. Confirmar SMA faltante.\n\n"
+            ok = send_telegram(aviso + bloque1)
+            if ok and bloque2:
+                time.sleep(1)
+                send_telegram(bloque2)
+        else:
+            bloque1, bloque2 = build_msg(d, a, pos, ia, txt_sent, tend_sem, noticia_av, s_boost, tema_ticker)
+            ok = send_telegram(bloque1)
+            if ok and bloque2:
+                time.sleep(1)
+                send_telegram(bloque2)
 
         if ok:
             nuevas += 1
@@ -1624,6 +1455,19 @@ def main():
 
     print(f"\nFin: {nuevas} señales nuevas | Total hoy: {count+nuevas} | Skips: {razones}")
 
+    # v8: detectar clusters temáticos
+    if nuevas > 0:
+        clusters = detectar_clusters(estado.get("alertados", []))
+        for tema_c, tickers_c in clusters:
+            msg_cl = (
+                f"🎯 <b>CLUSTER TEMÁTICO — {tema_c.upper()}</b>\n"
+                f"🕐 {hora_et()}\n\n"
+                f"{len(tickers_c)} señales hoy en el mismo tema:\n"
+                + "\n".join(f"  · <b>{t}</b>" for t in tickers_c)
+                + f"\n\n<i>Rotación sectorial detectada — Sirio v8 🌟</i>"
+            )
+            send_telegram(msg_cl)
+
     # ── HEARTBEAT — primer mensaje del día ──────────────────────────────────
     # Solo se envía si este run NO encontró señales nuevas.
     # Si hay señal → la señal ya es suficiente, el heartbeat sería ruido.
@@ -1640,13 +1484,12 @@ def main():
         hb_ok = send_telegram(
             f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()} · {zona_txt}\n\n"
-            f"✅ Sirio v7.2 activo · primer escaneo del día\n"
-            f"⚙️ ~490 tickers · score ≥65 · ATH ≥20% · precio>SMA200 · fan 3-4/4\n"
-            f"🧭 Filtros PA: Entorno · HH/HL · Gap · Fase 4H\n"
+            f"✅ Sirio activo · primer escaneo del día\n"
+            f"⚙️ ~900 tickers · score ≥65 · ATH ≥10% · precio>SMA200 · fan 3-4/4\n"
             f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
             f"<i>Señal nueva → aviso inmediato.</i>\n"
             f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"
-            f"<i>Sistema Sirio v7.2 — Solares</i> 🌟"
+            f"<i>Sirio v8 — Solares</i> 🌟"
         )
         if hb_ok:
             estado["heartbeat_enviado"] = True
@@ -1674,8 +1517,7 @@ def main():
         mapa = {"fan":"Fan 4/4","sma200":"Precio<SMA200","score":"Score<65","earnings":"Earnings",
                 "semanal":"Semanal baj.","tardia":"Tardía","error":"Error datos",
                 "cerca_ath":"ATH<25%","extendida":">2%SMA8",
-                "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80",
-                "chop":"Chop/rango"}
+                "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80"}
         top5 = sorted(razones.items(), key=lambda x:x[1], reverse=True)[:5]
         skips_txt = " · ".join(f"{mapa.get(k,k)}:{v}" for k,v in top5) if top5 else "sin datos"
         señales_hoy = count + nuevas
@@ -1714,7 +1556,292 @@ if __name__ == "__main__":
                 f"<code>{_err_txt}</code>\n\n"
                 f"<i>El bot se detuvo inesperadamente.\n"
                 f"Revisar GitHub Actions → pestaña Runs.</i>\n\n"
-                f"<i>Sistema Sirio v7 — Solares</i>"
+                f"<i>Sirio v8 — Solares</i>"
             )
         except Exception:
             pass
+
+# ═══════════════════════════════════════════════════════════════
+#  v8.0 — NUEVAS FUNCIONES
+# ═══════════════════════════════════════════════════════════════
+
+# ── ALPHA VANTAGE — noticias contextuales en español ─────────
+AV_KEY = os.environ.get("ALPHAVANTAGE_KEY", "")
+
+def _av_noticia(ticker):
+    """
+    Busca UNA noticia relevante de hoy vía Alpha Vantage.
+    Solo aparece si: relevancia >= 0.6, sentimiento bullish, noticia de hoy/ayer.
+    Retorna string en español listo para el mensaje, o None si no hay nada útil.
+    """
+    if not AV_KEY:
+        return None
+    try:
+        url = (f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT"
+               f"&tickers={ticker}&limit=5&apikey={AV_KEY}")
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200: return None
+        feed = r.json().get("feed", [])
+        if not feed: return None
+        hoy = date.today()
+        ayer = hoy - timedelta(days=1)
+        for item in feed:
+            # Solo noticias de hoy o ayer
+            try:
+                fecha_noticia = datetime.strptime(item["time_published"][:8], "%Y%m%d").date()
+                if fecha_noticia < ayer: continue
+            except: continue
+            # Buscar el ticker específico en ticker_sentiment
+            for ts in item.get("ticker_sentiment", []):
+                if ts.get("ticker","").upper() != ticker.upper(): continue
+                rel = float(ts.get("relevance_score", 0))
+                sent = float(ts.get("ticker_sentiment_score", 0))
+                if rel < 0.6 or sent < 0.15: continue  # irrelevante o neutral
+                titulo = item.get("title", "")[:120]
+                pct_bull = int((sent + 1) / 2 * 100)
+                return f"📰 {titulo} — alcista {pct_bull}%"
+        return None
+    except:
+        return None
+
+
+# ── SECTOR MOMENTUM — chequea ETFs de referencia ─────────────
+SECTOR_MAP = {
+    "XLE":  ["OXY","CVX","XOM","COP","DVN","HAL","SLB","MRO","FANG","EOG"],
+    "GDX":  ["NEM","AEM","GOLD","WPM","KGC","AGI","PAAS","AG"],
+    "XLB":  ["FCX","NUE","STLD","CLF","RS","AA","MP","ALB","SQM"],
+    "XLI":  ["CAT","DE","GE","HON","LMT","RTX","NOC","GD","KTOS"],
+    "XLV":  ["HIMS","ABBV","MRK","AMGN","GILD","EW","UNH"],
+    "XLF":  ["JPM","BAC","GS","MS","BX","KKR"],
+    "XLY":  ["MGM","WYNN","DAL","UAL","NKE","F","GM"],
+    "ARKK": ["RKLB","ASTS","COIN","MSTR","HOOD"],
+    "COPX": ["FCX","SCCO","HBM","TECK"],
+    "LIT":  ["ALB","SQM","LAC","PLL"],
+    "REMX": ["MP","UAMY"],
+    "URA":  ["CCJ","UEC","DNN","LEU"],
+}
+
+TEMA_MAP = {
+    "espacial":  ["RKLB","ASTS","LUNR","MNTS","BWXT","RDW"],
+    "nuclear":   ["SMR","CCJ","NNE","UEC","DNN","LEU","UUUU","OKLO"],
+    "cripto":    ["MARA","RIOT","CLSK","COIN","MSTR","HOOD","BTBT"],
+    "defensa":   ["KTOS","AXON","LMT","RTX","NOC","GD","BWXT","HII"],
+    "glp1":      ["HIMS","VKTX","CELH","CAVA"],
+    "semis_ai":  ["MU","AMD","INTC","AMAT","KLAC","LRCX","ON","ENTG","AMKR","UCTT"],
+    "oro_plata": ["NEM","AEM","WPM","GOLD","PAAS","AG","KGC"],
+    "energia":   ["OXY","CVX","XOM","COP","DVN","SLB","HAL","BTU"],
+    "homebuilders": ["DHI","LEN","PHM","TOL","KBH","MDC","NVR","SKY"],
+}
+
+def analizar_sector_etfs():
+    """
+    Chequea los ETFs de referencia al inicio del run.
+    Retorna dict: {etf: {"fan":N, "activo":bool, "pct":X}}
+    ETF con fan >= 3 = sector activo → boost score +8 a sus miembros.
+    """
+    resultado = {}
+    etfs_check = list(SECTOR_MAP.keys()) + ["SPY","QQQ"]
+    for etf in etfs_check:
+        try:
+            h = yf.Ticker(etf).history(period="60d", interval="1d")
+            if h.empty or len(h) < 30: continue
+            c = h["Close"]
+            p = float(c.iloc[-1])
+            s20 = float(c.iloc[-20:].mean())
+            s50 = float(c.iloc[-50:].mean())
+            s200 = float(c.iloc[-min(200,len(c)):].mean())
+            fan = sum([p > s200, s50 > s200, s20 > s50, p > s20])
+            pct = round((p - float(c.iloc[-2])) / float(c.iloc[-2]) * 100, 2)
+            resultado[etf] = {"fan": fan, "activo": fan >= 3, "pct": pct, "precio": round(p,2)}
+        except:
+            continue
+    activos = [e for e, v in resultado.items() if v["activo"]]
+    print(f"  [SECTORES] {len(activos)} activos: {', '.join(activos[:6])}")
+    return resultado
+
+
+def detectar_tema(ticker):
+    """Retorna el nombre del tema al que pertenece un ticker, o None."""
+    for tema, lista in TEMA_MAP.items():
+        if ticker in lista:
+            return tema
+    return None
+
+
+def detectar_clusters(alertados_hoy):
+    """
+    Si 3+ tickers del mismo tema señalaron hoy → alerta especial de cluster.
+    Retorna lista de (tema, tickers) con clusters activos.
+    """
+    conteo = {}
+    for t in alertados_hoy:
+        tema = detectar_tema(t)
+        if tema:
+            conteo.setdefault(tema, []).append(t)
+    return [(tema, tickers) for tema, tickers in conteo.items() if len(tickers) >= 3]
+
+
+def boost_sector(ticker, sectores_activos):
+    """
+    +8 puntos si el sector del ticker está activo (ETF fan >= 3).
+    +5 puntos si el tema está en TEMA_MAP y algún ETF correlacionado activo.
+    """
+    pts = 0
+    for etf, miembros in SECTOR_MAP.items():
+        if ticker in miembros:
+            info = sectores_activos.get(etf, {})
+            if info.get("activo"):
+                pts += 8
+                break
+    tema = detectar_tema(ticker)
+    if tema and pts == 0:
+        pts += 3  # bonus leve por pertenencia a tema aunque el ETF no esté
+    return pts
+
+
+# ── TICKERS NUEVOS v8 — universo expandido ───────────────────
+TICKERS_NUEVOS_V8 = [
+    # ── ESPACIAL / SpaceX proxy ────────────────────────────────
+    "RKLB","ASTS","LUNR","MNTS","RDW","BWXT","KTOS","AXON",
+    # ── NUCLEAR / Uranio ──────────────────────────────────────
+    "CCJ","NNE","UEC","DNN","LEU","UUUU","OKLO","VST","CEG","SMR",
+    # ── HOMEBUILDERS ──────────────────────────────────────────
+    "DHI","LEN","PHM","TOL","KBH","MDC","NVR","SKY","MHO","TMHC",
+    # ── AI INFRAESTRUCTURA ────────────────────────────────────
+    "VRT","CDNS","ANET","SMCI","COHR","BE","POWL",
+    # ── DEFENSA MODERNA ───────────────────────────────────────
+    "AXON","LDOS","CACI","BAH","SAIC","TDG","HWM","CW",
+    # ── GLP-1 / VIDA NUEVA ────────────────────────────────────
+    "VKTX","RVNC","ZFOX","HIMS",
+    # ── CRIPTO INFRAESTRUCTURA ────────────────────────────────
+    "HOOD","MSTR","SMLR","BTBT","HUT","CLSK",
+    # ── MATERIAS PRIMAS / AGUA ────────────────────────────────
+    "AWK","WTRG","XYL","GFL","CLH",
+    # ── CONSUMO RESILIENTE ────────────────────────────────────
+    "CAVA","BROS","SG","WING","TXRH",
+    # ── ENERGÍA ALTERNATIVA ───────────────────────────────────
+    "FSLR","ENPH","RUN","BE","PLUG",
+]
+
+
+# ── FONDITO MONITOR ──────────────────────────────────────────
+FONDITO_ACTIVAS = {
+    "IAU":  {"entrada": 85.03,  "shares": 2,  "tipo": "oro"},
+    "SLV":  {"entrada": 65.935, "shares": 2,  "tipo": "plata"},
+    "XLE":  {"entrada": 59.235, "shares": 3,  "tipo": "energia"},
+    "SGOV": {"entrada": 100.417,"shares": 0.9958, "tipo": "cash"},
+}
+
+FONDITO_PENDIENTES = {
+    "HODL": {"cond": "entrar_ya",   "presupuesto": 1170, "nota": "Clarity Act aprobado"},
+    "URA":  {"cond": "entrar_ya",   "presupuesto": 750,  "nota": "Nuclear ancla v8"},
+    "SMR":  {"cond": "entrar_ya",   "presupuesto": 290,  "nota": "Especulativo pequeño"},
+    "ASTS": {"cond": "precio_max",  "precio_max": 55,    "presupuesto": 520,  "nota": "SpaceX proxy"},
+    "UCTT": {"cond": "precio_max",  "precio_max": 65,    "presupuesto": 520,  "nota": "Semis backend"},
+    "AMKR": {"cond": "precio_max",  "precio_max": 63,    "presupuesto": 520,  "nota": "Semis backend"},
+    "REMX": {"cond": "precio_rsi",  "precio_max": 95, "rsi_max": 65, "presupuesto": 0, "nota": "Watchlist tierras raras"},
+    "CAVA": {"cond": "sobre_sma50", "presupuesto": 390,  "nota": "GLP-1 estilo vida"},
+    "CELH": {"cond": "entrar_jun",  "presupuesto": 390,  "nota": "GLP-1 energéticas"},
+    "KTOS": {"cond": "entrar_jun",  "presupuesto": 1170, "nota": "Defensa geopolítica"},
+    "MP":   {"cond": "entrar_jun",  "presupuesto": 650,  "nota": "Tierras raras"},
+    "AYA":  {"cond": "entrar_jun",  "presupuesto": 650,  "nota": "Plata Marruecos"},
+    "ONEQ": {"cond": "julio",       "presupuesto": 1300, "nota": "Tech broad DCA fijo"},
+}
+
+def fondito_monitor():
+    """
+    Monitoreo del portafolio pasivo Fondito.
+    1. Posiciones ACTIVAS: alerta si RSI semanal > 75 (toma parcial 25%)
+    2. Pendientes PRECIO: alerta si alcanzaron condición de entrada
+    3. Retorna mensaje Telegram o None si no hay nada urgente.
+    """
+    alertas = []
+    print("\n  [FONDITO] Revisando posiciones...")
+
+    # ── Activas — RSI semanal ──────────────────────────────────
+    for ticker, info in FONDITO_ACTIVAS.items():
+        if ticker == "SGOV": continue  # cash, skip
+        try:
+            h = yf.Ticker(ticker).history(period="1y", interval="1wk")
+            if h.empty or len(h) < 14: continue
+            c = h["Close"]
+            precio = float(c.iloc[-1])
+            rsi_w = calc_rsi(c, 14)
+            entrada = info["entrada"]
+            pct_desde = round((precio - entrada) / entrada * 100, 1)
+            print(f"    {ticker}: ${precio:.2f} | RSI_w={rsi_w:.0f if rsi_w else 'N/A'} | {pct_desde:+.1f}% desde entrada")
+            if rsi_w and rsi_w > 75:
+                alertas.append(
+                    f"⚠️ <b>{ticker}</b> — RSI semanal {rsi_w:.0f} &gt; 75\n"
+                    f"   💲 ${precio:.2f} ({pct_desde:+.1f}% desde entrada ${entrada})\n"
+                    f"   → Regla: toma parcial 25% ({info['shares']*0.25:.2f} acc)\n"
+                    f"   → Reinvertir en próximo tranche"
+                )
+        except Exception as ex:
+            print(f"    {ticker} error: {ex}")
+
+    # ── Pendientes — condición de precio ─────────────────────
+    for ticker, info in FONDITO_PENDIENTES.items():
+        cond = info.get("cond","")
+        if cond not in ("precio_max","precio_rsi","sobre_sma50","entrar_ya"):
+            continue
+        try:
+            fi = yf.Ticker(ticker).fast_info
+            precio = float(getattr(fi, "last_price", None) or 0)
+            if precio <= 0: continue
+            nota = info.get("nota","")
+            presup = info.get("presupuesto", 0)
+            shares_aprox = int(presup / precio) if precio > 0 else 0
+
+            if cond == "entrar_ya":
+                rsi_v = calc_rsi(yf.Ticker(ticker).history(period="60d")["Close"])
+                rsi_txt = f"RSI {rsi_v:.0f}" if rsi_v else ""
+                alertas.append(
+                    f"🟢 <b>{ticker}</b> — ENTRADA PENDIENTE\n"
+                    f"   💲 ${precio:.2f} | {rsi_txt} | {nota}\n"
+                    f"   → ~{shares_aprox} acciones | ${presup} presupuesto"
+                )
+            elif cond == "precio_max":
+                precio_max = info.get("precio_max", 9999)
+                if precio <= precio_max:
+                    alertas.append(
+                        f"✅ <b>{ticker}</b> — CONDICIÓN ALCANZADA\n"
+                        f"   💲 ${precio:.2f} ≤ ${precio_max} ✅ | {nota}\n"
+                        f"   → ~{shares_aprox} acciones | ${presup} presupuesto"
+                    )
+            elif cond == "precio_rsi":
+                precio_max = info.get("precio_max", 9999)
+                rsi_max_f = info.get("rsi_max", 65)
+                hist_r = yf.Ticker(ticker).history(period="60d")
+                rsi_v = calc_rsi(hist_r["Close"]) if not hist_r.empty else None
+                if precio <= precio_max and rsi_v and rsi_v <= rsi_max_f:
+                    alertas.append(
+                        f"✅ <b>{ticker}</b> — WATCHLIST ACTIVADA\n"
+                        f"   💲 ${precio:.2f} ≤ ${precio_max} ✅ | RSI {rsi_v:.0f} ≤ {rsi_max_f} ✅\n"
+                        f"   → {nota}"
+                    )
+            elif cond == "sobre_sma50":
+                hist_r = yf.Ticker(ticker).history(period="60d")
+                if not hist_r.empty:
+                    sma50_v = float(hist_r["Close"].iloc[-50:].mean())
+                    if precio >= sma50_v:
+                        alertas.append(
+                            f"✅ <b>{ticker}</b> — SOBRE SMA50\n"
+                            f"   💲 ${precio:.2f} ≥ SMA50 ${sma50_v:.2f} ✅ | {nota}\n"
+                            f"   → ~{shares_aprox} acciones | ${presup} presupuesto"
+                        )
+        except Exception as ex:
+            print(f"    {ticker} fondito error: {ex}")
+
+    if not alertas:
+        print("  [FONDITO] Sin alertas activas")
+        return None
+
+    msg = (
+        f"💼 <b>FONDITO — SOLARES</b>\n"
+        f"🕐 {hora_et()}\n\n"
+        + "\n\n".join(alertas)
+        + f"\n\n<i>Sin stop loss — DCA por tiempo\nSolares Fondito v8 🌟</i>"
+    )
+    return msg
+

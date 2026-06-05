@@ -13,6 +13,7 @@ from datetime import datetime, date, timezone, timedelta
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 CLAUDE_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+AV_KEY           = os.environ.get("ALPHAVANTAGE_KEY", "")
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     print("ERROR: Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en GitHub Secrets")
@@ -1566,8 +1567,6 @@ if __name__ == "__main__":
 # ═══════════════════════════════════════════════════════════════
 
 # ── ALPHA VANTAGE — noticias contextuales en español ─────────
-AV_KEY = os.environ.get("ALPHAVANTAGE_KEY", "")
-
 def _av_noticia(ticker):
     """
     Busca UNA noticia relevante de hoy vía Alpha Vantage.

@@ -275,6 +275,11 @@ def _stocktwits(ticker):
         return None
 
 
+BULL_KW = ["beat","surge","rally","upgrade","record","growth","soar",
+           "outperform","strong","gain","rise","jump","buy","bullish"]
+BEAR_KW = ["miss","plunge","downgrade","cut","decline","fall","drop",
+           "underperform","weak","loss","sell","bearish","warn"]
+
 def _yahoo_news(ticker):
     try:
         news=yf.Ticker(ticker).news
@@ -562,11 +567,17 @@ def obtener_universo():
     except:
         pass
 
+    # Fuente 5: universo temático v8 (espacial, nuclear, homebuilders, etc.)
+    añadidos_v8 = 0
+    for t in TICKERS_NUEVOS_V8:
+        if t not in universo:
+            universo.append(t); añadidos_v8 += 1
+
     resultado = universo[:CONFIG["max_tickers_scan"]]
     print(f"Universo total: {len(resultado)} tickers "
           f"(curado: {len(UNIVERSO_CURADO)}, "
           f"TV: +{añadidos_tv}, Finviz: +{añadidos_fv}, "
-          f"SP500: +{añadidos_sp}, movers: +{añadidos_movers})")
+          f"SP500: +{añadidos_sp}, movers: +{añadidos_movers}, v8: +{añadidos_v8})")
     return resultado
 
 
@@ -1542,25 +1553,6 @@ def main():
             estado["mensajes_hoy"]              = estado.get("mensajes_hoy", 0) + 1
             guardar_estado(estado)
 
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as _ex_fatal:
-        import traceback as _tb
-        _err_txt = str(_ex_fatal)[:200]
-        _tb_txt  = _tb.format_exc()[-300:]
-        print(f"FATAL: {_ex_fatal}")
-        try:
-            send_telegram(
-                f"🚨 <b>SISTEMA SIRIO — ERROR CRÍTICO</b>\n"
-                f"🕐 {hora_et()}\n\n"
-                f"<code>{_err_txt}</code>\n\n"
-                f"<i>El bot se detuvo inesperadamente.\n"
-                f"Revisar GitHub Actions → pestaña Runs.</i>\n\n"
-                f"<i>Sirio v8 — Solares</i>"
-            )
-        except Exception:
-            pass
 
 # ═══════════════════════════════════════════════════════════════
 #  v8.0 — NUEVAS FUNCIONES
@@ -1844,3 +1836,24 @@ def fondito_monitor():
     )
     return msg
 
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as _ex_fatal:
+        import traceback as _tb
+        _err_txt = str(_ex_fatal)[:200]
+        _tb_txt  = _tb.format_exc()[-300:]
+        print(f"FATAL: {_ex_fatal}")
+        try:
+            send_telegram(
+                f"🚨 <b>SISTEMA SIRIO — ERROR CRÍTICO</b>\n"
+                f"🕐 {hora_et()}\n\n"
+                f"<code>{_err_txt}</code>\n\n"
+                f"<i>El bot se detuvo inesperadamente.\n"
+                f"Revisar GitHub Actions → pestaña Runs.</i>\n\n"
+                f"<i>Sirio v8 — Solares</i>"
+            )
+        except Exception:
+            pass

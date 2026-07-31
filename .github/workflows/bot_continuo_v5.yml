@@ -1,0 +1,27 @@
+Solares — Sistema Sirio Bot
+
+# ═══════════════════════════════════════════════════════════════
+#  SCHEDULING — PROBLEMA CONOCIDO DE GITHUB ACTIONS
+#  Los cron jobs internos de GitHub se retrasan o se omiten cuando
+#  el repo tiene poca actividad. Solución: disparar via API externa.
+#
+#  TRIGGERS EXTERNOS (cron-job.org) — ver instrucciones en README:
+#  Los crons de abajo son el RESPALDO. El disparador principal debe
+#  ser una llamada HTTP desde cron-job.org al endpoint workflow_dispatch.
+#  URL: https://api.github.com/repos/TU_USER/Sistema-Lu-Bot/actions/workflows/bot_continuo_v5.yml/dispatches
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    # ─── RESPALDO INTERNO (puede llegar tarde, es normal) ────────
+    # ─── PRE-MARKET ──────────────────────────────────────────────
+    - cron: '30 11 * * 1-5'   #  7:30am ET — 2h antes apertura (pre-market)
+    # ─── MERCADO ABIERTO ─────────────────────────────────────────
+    - cron: '30 13 * * 1-5'   #  9:30am ET — apertura
+    - cron: '30 14 * * 1-5'   # 10:30am ET
+    - cron: '30 15 * * 1-5'   # 11:30am ET
+    - cron: '00 17 * * 1-5'   #  1:00pm ET — resumen 4H vela 1
+    - cron: '30 17 * * 1-5'   #  1:30pm ET
+    - cron: '30 18 * * 1-5'   #  2:30pm ET
+    - cron: '30 19 * * 1-5'   #  3:30pm ET — último escaneo + resumen 4H cierre
+    # NOTA: El código corta automáticamente si hora_et

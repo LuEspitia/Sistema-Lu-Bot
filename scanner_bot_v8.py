@@ -949,7 +949,7 @@ def analizar_ia(d, a, pos, sentiment_score, tendencia_semanal, noticias_yahoo=No
         time.sleep(6)
 
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=300,
             # Sin tools de web_search — evita rate limit y doble llamada interna
             system=(

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 # ═══════════════════════════════════════════════════════════════
-#  Solares — Sistema Sirio Bot  v6.0  (DEFINITIVO)
+#  Solares — Sistema Sirio Bot  v9.1
 #  Trader : Lu Espitia  |  Solares Trading
+#  NOTA: mantener el nombre de archivo "scanner_bot_v8.py" al subir a
+#  GitHub — bot_continuo_v5.yml dispara por ese nombre exacto vía
+#  workflow_dispatch. Cambiar el nombre del archivo rompe el disparo.
 # ═══════════════════════════════════════════════════════════════
 import yfinance as yf
 import pandas as pd
@@ -14,7 +17,7 @@ from datetime import datetime, date, timezone, timedelta
 # Deben estar en la raiz del repo, junto a este archivo.
 from detectar_regimen import detectar_regimen
 from composite_score import composite_score
-from carta_natal_transitos import tránsitos_de_hoy
+from carta_natal_transitos import tránsitos_de_hoy, fase_lunar_hoy
 
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -117,15 +120,22 @@ def fase_ciclo_hoy():
 TRANSITOS_MOSTRAR_EN_BOT = True
 
 def resumen_astrologico_hoy(max_aspectos=3):
-    """Devuelve un bloque corto con los aspectos natales activos hoy (via
-    Swiss Ephemeris, carta_natal_transitos.py), o cadena vacia si no hay
-    ninguno dentro de orbe. No falla el bot si algo sale mal (no bloqueante)."""
+    """Devuelve un bloque corto que cruza: (1) fase lunar del día + signo,
+    contra la Luna natal de Lu, y (2) los aspectos de tránsito más exactos
+    sobre su carta natal (via Swiss Ephemeris, carta_natal_transitos.py).
+    Cadena vacía si algo falla — no bloquea el bot (no bloqueante)."""
     try:
+        fase = fase_lunar_hoy()
+        luna_txt = (
+            f"🌙 Luna {fase['fase']} ({fase['iluminacion_pct']:.0f}%) en {fase['signo_transito']} "
+            f"— tu Luna natal está en {fase['signo_natal_luna']}\n"
+        )
         aspectos = tránsitos_de_hoy()[:max_aspectos]
-        if not aspectos:
-            return ""
-        lineas = "\n".join(f"  • {a.texto()}" for a in aspectos)
-        return f"✨ <b>Tránsitos de hoy:</b>\n{lineas}\n"
+        if aspectos:
+            aspectos_txt = "\n".join(f"  • {a.texto()}" for a in aspectos)
+        else:
+            aspectos_txt = "  • Sin aspectos exactos hoy"
+        return f"✨ <b>Tránsitos de hoy:</b>\n{luna_txt}{aspectos_txt}\n"
     except Exception as ex:
         print(f"  [ASTRO] Error (no bloqueante): {ex}")
         return ""
@@ -949,7 +959,7 @@ def analizar_ia(d, a, pos, sentiment_score, tendencia_semanal, noticias_yahoo=No
         time.sleep(6)
 
         msg = client.messages.create(
-            model="claude-sonnet-5",
+            model="claude-sonnet-4-20250514",
             max_tokens=300,
             # Sin tools de web_search — evita rate limit y doble llamada interna
             system=(
@@ -1427,9 +1437,9 @@ def main():
         ath_v = d.get("ath_52w", 0)
         if ath_v and ath_v > 0 and d["precio"] > 0:
             dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
-            if dist_ath_pct < 10.0:   # incluye negativo (en ATH o por encima) — v7.3: bajado de 20% a 10%
+            if dist_ath_pct < 25.0:   # FIX 04-ago-2026: estaba en 10.0, regla real es 25% mínimo
                 print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% del maximo 52s "
-                      f"({ath_v:.2f}) — necesita >=20% de espacio")
+                      f"({ath_v:.2f}) — necesita >=25% de espacio")
                 razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
                 continue
 
@@ -1589,15 +1599,26 @@ def main():
             zona_txt = "EDT (UTC-4)" if off_h == -4 else "EST (UTC-5)"
         except Exception:
             zona_txt = "ET"
+
+        # v9.1 (04-ago-2026): ciclo + tránsitos ahora también van en el
+        # heartbeat, no solo en el mensaje del Fondito — Lu pidió que la
+        # lectura astral salga en el bot, no solo en un mensaje aparte.
+        ciclo_txt_hb = ""
+        if CICLO_MOSTRAR_EN_BOT:
+            dias_c_hb, fase_c_hb, nota_c_hb = fase_ciclo_hoy()
+            ciclo_txt_hb = f"{fase_c_hb} (día {dias_c_hb}) — {nota_c_hb}\n"
+        astro_txt_hb = resumen_astrologico_hoy() if TRANSITOS_MOSTRAR_EN_BOT else ""
+
         hb_ok = send_telegram(
             f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()} · {zona_txt}\n\n"
             f"✅ Sirio activo · primer escaneo del día\n"
-            f"⚙️ ~900 tickers · score ≥65 · ATH ≥10% · precio>SMA200 · fan 3-4/4\n"
+            f"⚙️ ~900 tickers · score ≥65 · ATH ≥25% · precio>SMA200 · fan 2/3+\n"
             f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
+            f"{ciclo_txt_hb}{astro_txt_hb}\n"
             f"<i>Señal nueva → aviso inmediato.</i>\n"
             f"<i>Sin señales → status cada 2h + cierre 3:30pm.</i>\n\n"
-            f"<i>Sirio v8 — Solares</i> 🌟"
+            f"<i>Sirio v9 — Solares</i> 🌟"
         )
         if hb_ok:
             estado["heartbeat_enviado"] = True
@@ -1648,6 +1669,26 @@ def main():
             estado["sin_coincidencias_enviado"] = True
             estado["mensajes_hoy"]              = estado.get("mensajes_hoy", 0) + 1
             guardar_estado(estado)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as _ex_fatal:
+        import traceback as _tb
+        _err_txt = str(_ex_fatal)[:200]
+        _tb_txt  = _tb.format_exc()[-300:]
+        print(f"FATAL: {_ex_fatal}")
+        try:
+            send_telegram(
+                f"🚨 <b>SISTEMA SIRIO — ERROR CRÍTICO</b>\n"
+                f"🕐 {hora_et()}\n\n"
+                f"<code>{_err_txt}</code>\n\n"
+                f"<i>El bot se detuvo inesperadamente.\n"
+                f"Revisar GitHub Actions → pestaña Runs.</i>\n\n"
+                f"<i>Sirio v8 — Solares</i>"
+            )
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════════
 #  v8.0 — NUEVAS FUNCIONES
@@ -1942,22 +1983,3 @@ def fondito_monitor():
     )
     return msg
 
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as _ex_fatal:
-        import traceback as _tb
-        _err_txt = str(_ex_fatal)[:200]
-        _tb_txt  = _tb.format_exc()[-300:]
-        print(f"FATAL: {_ex_fatal}")
-        try:
-            send_telegram(
-                f"🚨 <b>SISTEMA SIRIO — ERROR CRÍTICO</b>\n"
-                f"🕐 {hora_et()}\n\n"
-                f"<code>{_err_txt}</code>\n\n"
-                f"<i>El bot se detuvo inesperadamente.\n"
-                f"Revisar GitHub Actions → pestaña Runs.</i>\n\n"
-                f"<i>Sirio v8 — Solares</i>"
-            )
-        except Exception:
-            pass

@@ -24,6 +24,7 @@ USO:
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
+import math
 import swisseph as swe
 
 swe.set_ephe_path('')  # Moshier no necesita archivos — evita que busque un path que no existe
@@ -99,6 +100,50 @@ def posiciones_hoy(fecha: date = None) -> dict:
     return resultado
 
 
+# ── FASE LUNAR DEL DIA — cruzada con la Luna natal ──────────────────────
+# Iluminacion y fase (Nueva/Creciente/Llena/Menguante) via elongacion Sol-Luna.
+# Distinto de los aspectos de tránsitos_de_hoy(): esto es la fase lunar
+# "de calendario" (igual a la que reporta cualquier app de fases lunares),
+# más el cruce contextual contra el signo de la Luna natal de Lu.
+def fase_lunar_hoy(fecha: date = None) -> dict:
+    fecha = fecha or date.today()
+    jd = swe.julday(fecha.year, fecha.month, fecha.day, 12.0)
+    sol_lon = _long_transito(jd, "Sol")
+    luna_lon = _long_transito(jd, "Luna")
+    elong = (luna_lon - sol_lon) % 360
+    iluminacion = round((1 - math.cos(math.radians(elong))) / 2 * 100, 1)
+
+    if elong < 1 or elong > 359:
+        nombre = "Luna Nueva"
+    elif abs(elong - 90) < 1:
+        nombre = "Cuarto Creciente"
+    elif elong < 90:
+        nombre = "Creciente"
+    elif abs(elong - 180) < 1:
+        nombre = "Luna Llena"
+    elif elong < 180:
+        nombre = "Gibosa Creciente"
+    elif abs(elong - 270) < 1:
+        nombre = "Cuarto Menguante"
+    elif elong < 270:
+        nombre = "Gibosa Menguante"
+    else:
+        nombre = "Menguante"
+
+    creciente = elong < 180
+    signo_transito = _signo(luna_lon)
+    signo_natal_luna = _signo(NATAL["Luna"])
+
+    return {
+        "fase": nombre,
+        "creciente": creciente,
+        "iluminacion_pct": iluminacion,
+        "elongacion": round(elong, 1),
+        "signo_transito": signo_transito,
+        "signo_natal_luna": signo_natal_luna,
+    }
+
+
 def tránsitos_de_hoy(fecha: date = None, solo_activos: bool = True) -> list[Aspecto]:
     """
     Calcula todos los aspectos entre planetas en transito y la carta natal
@@ -132,6 +177,11 @@ if __name__ == "__main__":
     print(f"=== Posiciones en transito — {hoy} ===")
     for nombre, info in posiciones_hoy(hoy).items():
         print(f"  {nombre}: {info['grado']:.2f}° {info['signo']}")
+
+    fase = fase_lunar_hoy(hoy)
+    print(f"\n=== Fase lunar — {hoy} ===")
+    print(f"  {fase['fase']} ({fase['iluminacion_pct']}% iluminada) en {fase['signo_transito']} "
+          f"— Luna natal en {fase['signo_natal_luna']}")
 
     print(f"\n=== Aspectos activos sobre la carta natal de Lu — {hoy} ===")
     aspectos = tránsitos_de_hoy(hoy)

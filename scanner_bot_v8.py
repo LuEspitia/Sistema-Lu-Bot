@@ -1670,26 +1670,6 @@ def main():
             estado["mensajes_hoy"]              = estado.get("mensajes_hoy", 0) + 1
             guardar_estado(estado)
 
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as _ex_fatal:
-        import traceback as _tb
-        _err_txt = str(_ex_fatal)[:200]
-        _tb_txt  = _tb.format_exc()[-300:]
-        print(f"FATAL: {_ex_fatal}")
-        try:
-            send_telegram(
-                f"🚨 <b>SISTEMA SIRIO — ERROR CRÍTICO</b>\n"
-                f"🕐 {hora_et()}\n\n"
-                f"<code>{_err_txt}</code>\n\n"
-                f"<i>El bot se detuvo inesperadamente.\n"
-                f"Revisar GitHub Actions → pestaña Runs.</i>\n\n"
-                f"<i>Sirio v8 — Solares</i>"
-            )
-        except Exception:
-            pass
-
 # ═══════════════════════════════════════════════════════════════
 #  v8.0 — NUEVAS FUNCIONES
 # ═══════════════════════════════════════════════════════════════
@@ -1982,4 +1962,29 @@ def fondito_monitor():
         + f"<i>Sin stop loss — DCA por tiempo\nSolares Fondito v8 🌟</i>"
     )
     return msg
+
+if __name__ == "__main__":
+    import sys
+    try:
+        main()
+    except Exception as _ex_fatal:
+        import traceback as _tb
+        _err_txt = str(_ex_fatal)[:200]
+        _tb_txt  = _tb.format_exc()[-300:]
+        print(f"FATAL: {_ex_fatal}")
+        try:
+            send_telegram(
+                f"🚨 <b>SISTEMA SIRIO — ERROR CRÍTICO</b>\n"
+                f"🕐 {hora_et()}\n\n"
+                f"<code>{_err_txt}</code>\n\n"
+                f"<i>El bot se detuvo inesperadamente.\n"
+                f"Revisar GitHub Actions → pestaña Runs.</i>\n\n"
+                f"<i>Sirio v9 — Solares</i>"
+            )
+        except Exception:
+            pass
+        # FIX 04-ago-2026: antes el except terminaba aquí sin salir con error,
+        # por eso GitHub Actions marcaba el run en VERDE aunque el bot se
+        # hubiera caído. Ahora sale con código de error real.
+        sys.exit(1)
 

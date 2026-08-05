@@ -119,10 +119,43 @@ def fase_ciclo_hoy():
 # el repo es privado y es su dato, su llamada.
 TRANSITOS_MOSTRAR_EN_BOT = True
 
+def interpretar_astro_ia(luna_txt, aspectos, fase_ciclo_tuple):
+    """Interpretación IA (1-2 frases) que cruza tránsitos + fase del ciclo
+    y dice qué implica HOY para el trading — no solo lista datos crudos.
+    Cadena vacía si falla o si no hay API key — no bloquea el bot."""
+    if not CLAUDE_API_KEY:
+        return ""
+    try:
+        dias_c, fase_c, nota_c = fase_ciclo_tuple
+        aspectos_txt = "\n".join(f"- {a.texto()}" for a in aspectos) if aspectos else "Sin aspectos exactos hoy."
+        prompt = (
+            f"Datos astrológicos de hoy para una trader (esto es dato personal suyo, "
+            f"ella pidió esta integración explícitamente):\n\n"
+            f"{luna_txt}\n{aspectos_txt}\n\n"
+            f"Ciclo menstrual: {fase_c} (día {dias_c}) — {nota_c}\n\n"
+            f"En máximo 2 frases cortas, en español, conecta esto con su estado/energía "
+            f"de hoy para operar (foco, paciencia, impulsividad, cautela). "
+            f"Sin genericidades tipo horóscopo — aterrizado a trading. "
+            f"No repitas los datos crudos, solo la lectura."
+        )
+        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+        msg = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=120,
+            system="Eres el módulo de interpretación astro-trading de Sistema Sirio. Directo, breve, sin relleno esotérico.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip() if msg.content else ""
+    except Exception as ex:
+        print(f"  [ASTRO-IA] Error (no bloqueante): {ex}")
+        return ""
+
+
 def resumen_astrologico_hoy(max_aspectos=3):
     """Devuelve un bloque corto que cruza: (1) fase lunar del día + signo,
-    contra la Luna natal de Lu, y (2) los aspectos de tránsito más exactos
-    sobre su carta natal (via Swiss Ephemeris, carta_natal_transitos.py).
+    contra la Luna natal de Lu, (2) los aspectos de tránsito más exactos
+    sobre su carta natal (via Swiss Ephemeris, carta_natal_transitos.py), y
+    (3) una interpretación IA aterrizada a trading (no solo datos crudos).
     Cadena vacía si algo falla — no bloquea el bot (no bloqueante)."""
     try:
         fase = fase_lunar_hoy()
@@ -135,7 +168,11 @@ def resumen_astrologico_hoy(max_aspectos=3):
             aspectos_txt = "\n".join(f"  • {a.texto()}" for a in aspectos)
         else:
             aspectos_txt = "  • Sin aspectos exactos hoy"
-        return f"✨ <b>Tránsitos de hoy:</b>\n{luna_txt}{aspectos_txt}\n"
+
+        interpretacion = interpretar_astro_ia(luna_txt, aspectos, fase_ciclo_hoy())
+        interp_txt = f"\n💫 <i>{interpretacion}</i>\n" if interpretacion else ""
+
+        return f"✨ <b>Tránsitos de hoy:</b>\n{luna_txt}{aspectos_txt}\n{interp_txt}"
     except Exception as ex:
         print(f"  [ASTRO] Error (no bloqueante): {ex}")
         return ""
@@ -959,7 +996,7 @@ def analizar_ia(d, a, pos, sentiment_score, tendencia_semanal, noticias_yahoo=No
         time.sleep(6)
 
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=300,
             # Sin tools de web_search — evita rate limit y doble llamada interna
             system=(

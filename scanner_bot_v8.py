@@ -1987,4 +1987,3 @@ if __name__ == "__main__":
         # por eso GitHub Actions marcaba el run en VERDE aunque el bot se
         # hubiera caído. Ahora sale con código de error real.
         sys.exit(1)
-

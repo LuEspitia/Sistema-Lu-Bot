@@ -66,6 +66,58 @@ ORBE_LENTO = 5.0
 PLANETAS_RAPIDOS = {"Sol", "Luna", "Mercurio", "Venus", "Marte"}
 
 
+# ── INTERPRETACION — agregado 04-sep-2026 ──────────────────────────
+# Diagnostico de Lu: "nunca hubo una interpretacion real segun mi carta
+# natal". Confirmado en el codigo — .texto() solo imprimia el dato
+# astronomico crudo ("Urano transito Trigono Luna natal (orbe 0.1°)")
+# sin ninguna capa de significado. La memoria de sesiones decia que esto
+# ya estaba resuelto ("interpretacion humana de 2 frases") pero nunca se
+# implemento de verdad. Esto lo construye por composicion: significado
+# del planeta en transito + tono del aspecto + area de vida del punto
+# natal tocado = una frase coherente, no una lista de 550 casos sueltos.
+#
+# IMPORTANTE — esto es una herramienta de auto-reflexion/estado de animo
+# para Lu, no una prediccion de mercado. La interpretacion astrologica no
+# tiene validez predictiva demostrada sobre precios; se usa aqui como un
+# check-in de disciplina/temperamento, igual que el semaforo de ciclo.
+
+SIGNIFICADO_TRANSITO = {
+    "Sol":      "enfoque y protagonismo",
+    "Luna":     "estado de animo e instinto",
+    "Mercurio": "mente analitica y comunicacion",
+    "Venus":    "relacion con el dinero y los valores propios",
+    "Marte":    "impulso de accion y agresividad",
+    "Jupiter":  "expansion, optimismo y apetito de riesgo",
+    "Saturno":  "disciplina, cautela y limites",
+    "Urano":    "volatilidad, rupturas y sorpresas",
+    "Neptuno":  "intuicion, confusion o ilusion",
+    "Pluton":   "necesidad de control y transformacion",
+}
+
+AREA_NATAL = {
+    "Sol":        "tu identidad y voluntad de fondo",
+    "Luna":       "tu mundo emocional",
+    "Mercurio":   "tu forma de pensar y decidir",
+    "Venus":      "tu relacion con el dinero",
+    "Marte":      "tu forma de tomar accion y riesgo",
+    "Jupiter":    "tu confianza y apetito de expansion",
+    "Saturno":    "tus miedos y tu disciplina",
+    "Urano":      "tu necesidad de cambio o rebeldia",
+    "Neptuno":    "tu intuicion (y tu punto ciego)",
+    "Pluton":     "tu necesidad de control",
+    "Ascendente": "como actuas de cara al mercado y a otros",
+}
+
+TONO_ASPECTO = {
+    # (adjetivo, consejo practico orientado a trading/disciplina)
+    "Conjuncion": ("intensifica",     "puede sentirse como urgencia — antes de actuar, confirma que es señal y no impulso"),
+    "Sextil":     ("abre una oportunidad fluida en", "buen momento para ejecutar sin forzar, si el sistema ya dio luz verde"),
+    "Cuadratura": ("genera friccion en",         "cuidado con decisiones tomadas desde la frustracion o la prisa"),
+    "Trigono":    ("fluye con facilidad hacia",  "favorece la claridad, pero la facilidad tambien puede tentar a saltarse un paso del sistema"),
+    "Oposicion":  ("pide equilibrio entre",      "revisa si estas viendo solo un lado de la decision antes de comprometerte"),
+}
+
+
 @dataclass
 class Aspecto:
     planeta_transito: str
@@ -77,6 +129,14 @@ class Aspecto:
     def texto(self) -> str:
         return (f"{self.planeta_transito} transito {self.aspecto} {self.planeta_natal} natal "
                 f"(orbe {self.orbe:.1f}°)")
+
+    def interpretacion(self) -> str:
+        """Frase compuesta con significado real, no solo el dato crudo."""
+        sig_t = SIGNIFICADO_TRANSITO.get(self.planeta_transito, self.planeta_transito)
+        area_n = AREA_NATAL.get(self.planeta_natal, f"tu {self.planeta_natal} natal")
+        verbo, consejo = TONO_ASPECTO.get(self.aspecto, ("toca", "obsérvalo sin sobre-reaccionar"))
+        return (f"{self.planeta_transito} ({sig_t}) {verbo} {area_n} "
+                f"— {consejo}.")
 
 
 def _long_transito(jd: float, planeta: str) -> float:
@@ -127,41 +187,6 @@ def tránsitos_de_hoy(fecha: date = None, solo_activos: bool = True) -> list[Asp
     return activos
 
 
-def fase_lunar_hoy(fecha: date = None) -> dict:
-    """
-    Fase lunar de hoy (creciente/menguante + % iluminacion) + signo en
-    transito de la Luna, comparado contra la Luna natal de Lu (Libra).
-    Formula de iluminacion via elongacion Sol-Luna: k = (1 - cos(elong)) / 2.
-    """
-    fecha = fecha or date.today()
-    jd = swe.julday(fecha.year, fecha.month, fecha.day, 12.0)
-
-    lon_luna = _long_transito(jd, "Luna")
-    lon_sol = _long_transito(jd, "Sol")
-    elong = (lon_luna - lon_sol) % 360  # 0-360, 0=nueva, 180=llena
-
-    import math
-    iluminacion_pct = (1 - math.cos(math.radians(elong))) / 2 * 100
-
-    creciente = elong < 180
-    if iluminacion_pct < 1:
-        nombre = "Nueva"
-    elif iluminacion_pct > 99:
-        nombre = "Llena"
-    elif iluminacion_pct < 50:
-        nombre = "Creciente" if creciente else "Menguante"
-    else:
-        nombre = "Gibosa Creciente" if creciente else "Gibosa Menguante"
-
-    return {
-        "fase": nombre,
-        "iluminacion_pct": iluminacion_pct,
-        "signo_transito": _signo(lon_luna),
-        "signo_natal_luna": _signo(NATAL["Luna"]),
-        "elongacion": elong,
-    }
-
-
 if __name__ == "__main__":
     hoy = date.today()
     print(f"=== Posiciones en transito — {hoy} ===")
@@ -174,6 +199,20 @@ if __name__ == "__main__":
         print("  Sin aspectos dentro de orbe hoy.")
     for a in aspectos:
         print(f"  {a.texto()}")
+        print(f"    → {a.interpretacion()}")
+
+    # Nota sobre "siempre orbe casi 0": no es señal especial, es combinatoria.
+    # 10 planetas en transito x 11 puntos natales x 5 aspectos = 550 combos
+    # revisados cada dia. Con tolerancia de 3-5°, es estadisticamente normal
+    # que varias combinaciones caigan bajo 0.3° de orbe casi todos los dias
+    # — el bot ademas ordena por orbe ascendente y solo muestra el top 3, asi
+    # que SIEMPRE va a mostrar los mas "exactos" del dia, sea cual sea ese
+    # numero. Ver cuantos combos se revisaron hoy en total:
+    print(f"\n(Total de combinaciones revisadas hoy: "
+          f"{len(PLANETAS_TRANSITO)} planetas x {len(NATAL)} puntos natales x "
+          f"{len(ASPECTOS)} aspectos = {len(PLANETAS_TRANSITO)*len(NATAL)*len(ASPECTOS)}. "
+          f"Con {len(tránsitos_de_hoy(hoy))} dentro de orbe hoy — por eso el top 3 "
+          f"casi siempre sale con orbe chico, no es un dia astrologicamente especial.)")
 
     # Verificacion cruzada: el 30-jul-2026 Venus transito debia estar en
     # Virgo tarde (~22°), ya pasado el stellium natal (Sol/Venus/Marte 2-5°,

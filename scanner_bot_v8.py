@@ -69,8 +69,7 @@ CONFIG = {
     "riesgo_fijo_usd":     100,
     "stop_loss_pct":       6.0,
     "price_min":           10.0,
-    "price_max":           120.0,   # CORREGIDO 11-ago-2026 — Lu fijo el techo en 120 (antes 150)
-    "espacio_min_rr":      2.0,     # NUEVO 11-ago-2026 — espacio minimo 2:1 a la proxima resistencia
+    "price_max":           150.0,
     "rsi_min":             40,    # v9: corregido — era 45, canon dice 40 (Sistema 6 Pasos)
     "rsi_max":             58,    # v9: corregido — era 65, canon dice 58
     "min_volume_abs":      500_000,
@@ -105,43 +104,15 @@ CONFIG = {
 # v9.1 (30-jul-2026): activado por defecto — Lu pidio dejar de decidir por
 # ella. El repo es privado y es su dato, su llamada, no la mia.
 CICLO_MOSTRAR_EN_BOT = True
-CICLO_ANCLA_FECHA = date(2026, 8, 4)    # dia 1 confirmado en vivo 11-ago-2026 (dia 8/26 ese dia)
-CICLO_DURACION_DIAS = 26
+CICLO_ANCLA_FECHA = date(2026, 7, 11)   # dia 1 del ciclo confirmado 30-jul-2026
+CICLO_DURACION_DIAS = 27
 
 def fase_ciclo_hoy():
-    """
-    Semaforo v2 (rediseñado 11-ago-2026, decision de Lu). Pausa real REDUCIDA a
-    6 dias por ciclo en vez de los 15-20 del diseño anterior:
-      - Dias 1-3: menstruacion (los de mas colico) -> PAUSA
-      - Ultimos 3 dias del ciclo: SPM / lutea tardia -> PAUSA
-      - Todo lo demas: Sirio activo, escanea largo y corto sin restriccion
-    La luna YA NO bloquea entradas — ver nota_lunar_direccional() para la nota
-    informativa que se agrega a cada mensaje de señal.
-    """
     dias = (date.today() - CICLO_ANCLA_FECHA).days % CICLO_DURACION_DIAS + 1
-    if dias <= 3:
-        return dias, "🔴 Menstrual (pausa)", "SOLO revisar, NO entrar — colico"
-    elif dias > CICLO_DURACION_DIAS - 3:
-        return dias, "🔴 SPM / lútea tardía (pausa)", "SOLO revisar, NO entrar"
-    else:
-        return dias, "🟢 Activo", "Sirio escanea largo y corto normal"
-
-def nota_lunar_direccional(fase_lunar_dict=None):
-    """
-    v2 (11-ago-2026): la luna ya no bloquea — da una nota direccional que se
-    agrega a cada mensaje de señal (largo o corto). Se manda igual el otro tipo
-    de señal si aparece; esto es contexto para Lu, no un filtro del bot.
-    """
-    try:
-        fase = fase_lunar_dict or fase_lunar_hoy()
-        f = fase.get("fase", "")
-        if "reciente" in f or "Nueva" in f:
-            return "🌒 luna creciente — hoy favorece leer primero las señales LARGAS"
-        elif "enguante" in f or "Llena" in f:
-            return "🌖 luna menguante — hoy favorece leer primero las señales CORTAS"
-        return ""
-    except Exception:
-        return ""
+    if dias <= 5:                  return dias, "🔴 Menstrual", "SOLO revisar, NO entrar"
+    elif dias <= 13:               return dias, "🟢 Folicular", "score normal"
+    elif dias == 14 or dias == 15: return dias, "⭐ Ovulación", "mejor ventana del mes"
+    else:                          return dias, "🟡 Lútea", "reducir tamaño, no abrir nuevas"
 
 # v9: TRANSITOS REALES (ephem, calculado grado por grado, no rangos de fecha
 # aproximados). Activado por defecto — Lu pidió dejar de decidir por ella;
@@ -159,9 +130,23 @@ def resumen_astrologico_hoy(max_aspectos=3):
             f"🌙 Luna {fase['fase']} ({fase['iluminacion_pct']:.0f}%) en {fase['signo_transito']} "
             f"— tu Luna natal está en {fase['signo_natal_luna']}\n"
         )
+        # v10 (04-sep-2026): antes mostraba 3 aspectos como dato crudo sin
+        # interpretacion ("Urano transito Trigono Luna natal (orbe 0.1°)").
+        # Lu: "nunca hubo una interpretacion real" — confirmado, el codigo
+        # viejo no tenia capa de significado. Ahora usa .interpretacion()
+        # (compone significado del planeta + tono del aspecto + area natal)
+        # y muestra solo el mas exacto (no 3) para que sea legible, no una
+        # lista. Nota: que salga casi siempre con orbe <0.5° no es un dia
+        # especial — son 550 combinaciones revisadas por dia (10 planetas x
+        # 11 puntos natales x 5 aspectos), ordenadas por orbe ascendente;
+        # estadisticamente casi siempre hay algo bajo 0.3° de pura combinatoria.
         aspectos = tránsitos_de_hoy()[:max_aspectos]
         if aspectos:
-            aspectos_txt = "\n".join(f"  • {a.texto()}" for a in aspectos)
+            principal = aspectos[0]
+            aspectos_txt = f"  • {principal.interpretacion()}"
+            if len(aspectos) > 1:
+                extra = ", ".join(f"{a.planeta_transito}-{a.planeta_natal}" for a in aspectos[1:])
+                aspectos_txt += f"\n  • (también en orbe hoy, sin desarrollar: {extra})"
         else:
             aspectos_txt = "  • Sin aspectos exactos hoy"
         return f"✨ <b>Tránsitos de hoy:</b>\n{luna_txt}{aspectos_txt}\n"
@@ -751,148 +736,6 @@ def detectar_velas(hist):
     except:
         return "Error calculando velas",0
 
-def detectar_velas_bajistas(hist):
-    """
-    NUEVO 11-ago-2026 — espejo de detectar_velas() para el Sistema 6 Pasos CORTO.
-    Mismos umbrales geometricos, patrones invertidos (reversion bajista en resistencia).
-    """
-    try:
-        if len(hist)<3: return "Sin datos suficientes",0
-        o=hist["Open"].values; h=hist["High"].values
-        c=hist["Close"].values; l=hist["Low"].values
-        o1,h1,c1,l1=o[-1],h[-1],c[-1],l[-1]
-        o2,h2,c2,l2=o[-2],h[-2],c[-2],l[-2]
-        o3,h3,c3,l3=o[-3],h[-3],c[-3],l[-3]
-        cuerpo1=abs(c1-o1); rango1=h1-l1 if h1-l1>0 else 0.0001
-        mecha_inf=min(o1,c1)-l1; mecha_sup=h1-max(o1,c1)
-        cuerpo2=abs(c2-o2); bajista1=c1<o1; alcista2=c2>o2
-        if mecha_sup>=2*cuerpo1 and mecha_inf<=cuerpo1*0.5 and cuerpo1>=rango1*0.15:
-            return "🌠 Shooting Star — confirmación fuerte en resistencia",90
-        if bajista1 and alcista2 and o1>=c2 and c1<=o2 and cuerpo1>cuerpo2:
-            return "🔴 Bearish Engulfing — señal de venta fuerte",85
-        if c3>o3 and abs(c2-o2)<abs(c3-o3)*0.4 and c1<o1 and c1<(o3+c3)/2:
-            return "🌆 Evening Star — reversión de 3 velas",85
-        if bajista1 and alcista2 and o1>h2 and c1<(o2+c2)/2 and c1>o2:
-            return "📉 Dark Cloud Cover — rechazo bajista moderado",70
-        if cuerpo1<=rango1*0.1 and alcista2 and c2>c3:
-            return "⚖️ Doji en resistencia — esperar confirmación mañana",55
-        if bajista1 and cuerpo1>=rango1*0.6 and mecha_sup<=cuerpo1*0.3:
-            return "🔻 Vela roja fuerte — momentum bajista",65
-        if cuerpo1<=rango1*0.1:
-            return "↔️ Doji neutro — mercado indeciso",30
-        return "Vela sin patrón específico",40
-    except:
-        return "Error calculando velas",0
-
-def build_msg_venta_corta(d, a, pos, dist_s8):
-    """
-    NUEVO 11-ago-2026 — mensaje de señal CORTO nueva. Version mas simple que
-    build_msg() (sin composite score / sector boost / IA todavia — eso queda
-    como siguiente mejora, no se quiso arriesgar romper el pipeline largo
-    metiendolo todo junto sin pruebas reales primero).
-    """
-    rsi_v = d["rsi"] if d["rsi"] else 0
-    nota_luna = nota_lunar_direccional()
-    luna_txt = f"\n{nota_luna}\n" if nota_luna else "\n"
-    return (
-        f"🔴 <b>CORTO — {d['ticker']}</b> ({d.get('nombre',d['ticker'])})\n"
-        f"🕐 {hora_et()}\n{luna_txt}\n"
-        f"<b>Sistema 6 Pasos CORTO</b>\n"
-        f"Vela: {d.get('vela_patron_corta','sin patrón')} (fuerza {d.get('vela_fuerza_corta',0)}%)\n"
-        f"RSI: {rsi_v:.0f}  |  Vol: {a['vol_r']:.1f}x  |  Score: {a['score']}/100\n"
-        f"Fan corto: {a['fan']}/4  |  Zona: {dist_s8:.1f}% bajo SMA8\n"
-        f"{d.get('macd_e','')}\n\n"
-        f"<b>Niveles (venta en corto)</b>\n"
-        f"💲 Entrada: <b>{d['precio']:.2f}</b>\n"
-        f"🛑 Stop (arriba): {pos['stop']:.2f}\n"
-        f"🎯 T1: {pos['t1']:.2f}  ·  T2: {pos['t2']:.2f}  ·  T3: {pos['t3']:.2f}\n"
-        f"📐 R/R (sobre T2): {pos['rr']:.1f}x  |  Acciones: {pos['acc']} (${pos['tot']:.0f})\n\n"
-        f"<b>Gestión de salida</b>\n"
-        f"50% → T1 → stop a costo  |  30% → T2  |  20% → trailing SMA20\n\n"
-        f"<i>Sirio v9 — Solares</i> 🌟"
-    )
-
-def escanear_cortos(pendientes, estado, razones):
-    """
-    NUEVO 11-ago-2026 — pasada de escaneo independiente para el Sistema 6 Pasos
-    CORTO. Corre despues del escaneo largo, mismo universo. Es una funcion
-    separada (no interlazada con el loop largo) a proposito: asi no se arriesga
-    romper la logica larga ya probada. Cuesta el doble de llamadas a yfinance
-    por corrida — optimizar despues si el volumen de tickers lo justifica.
-    Retorna cuantas señales cortas nuevas se mandaron.
-    """
-    corto_enviado = estado.get("corto_enviado", [])
-    nuevas_corto = 0
-    print(f"\n[CORTO] Escaneando {len(pendientes)} tickers...")
-
-    for ticker in pendientes:
-        if ticker in corto_enviado:
-            continue  # 1 señal corta por ticker por dia, igual que el largo
-        d = obtener_datos(ticker)
-        if d.get("error"):
-            continue
-
-        # Paso 1 CORTO — veto absoluto: precio BAJO SMA200
-        if not (d.get("sma200") and d["precio"] < d["sma200"]):
-            continue
-
-        a = analizar_corto(d)
-        fan_minimo_observar = CONFIG["min_fan_to_alert"]
-        if a["fan"] < fan_minimo_observar or not a["en_rango"] or not a["vol_ok"]:
-            continue
-        if a["vol_r"] < 0.7:
-            continue
-        rsi_v_check = d.get("rsi", 0) or 0
-        if rsi_v_check < 20:   # espejo del filtro de sobrecompra extrema (>80 largo)
-            continue
-        if a["score"] < CONFIG["score_minimo"]:
-            continue
-
-        # Espacio 2:1 hacia el piso de 52 semanas (espejo del chequeo largo con ath_52w)
-        pos_prelim = posicion_corto(d["precio"], d.get("piso_52w"), d.get("atr"), d.get("beta"))
-        riesgo_prelim = pos_prelim["rx"]
-        espacio_disp = abs(d["precio"] - d.get("piso_52w", 0)) if d.get("piso_52w") else 0
-        if riesgo_prelim <= 0 or (espacio_disp / riesgo_prelim) < CONFIG["espacio_min_rr"]:
-            continue
-
-        hay_earn, _ = check_earnings_proximos(ticker)
-        if hay_earn:
-            continue
-        semanal_ok, tend_sem = check_tendencia_semanal_corto(ticker)
-        if not semanal_ok:
-            continue
-
-        # Espejo del filtro ATH — aqui, distancia MINIMA 25% SOBRE el piso de 52s
-        # (para que el corto tenga espacio real hacia abajo antes de tocar soporte fuerte)
-        piso_v = d.get("piso_52w", 0)
-        if piso_v and piso_v > 0 and d["precio"] > 0:
-            dist_piso_pct = (d["precio"] - piso_v) / piso_v * 100
-            if dist_piso_pct < 25.0:
-                continue
-
-        sma8v = d.get("sma8") or 0
-        dist_s8 = ((sma8v - d["precio"]) / sma8v * 100) if sma8v > 0 else 0
-        if dist_s8 > 3.5:   # espejo: extendida mas de 3.5% bajo SMA8, ya tarde
-            continue
-
-        # Patron de vela minimamente relevante (espejo del umbral implicito largo)
-        if d.get("vela_fuerza_corta", 0) < 55:
-            continue
-
-        pos = pos_prelim
-        msg = build_msg_venta_corta(d, a, pos, dist_s8)
-        ok = send_telegram(msg)
-        if ok:
-            nuevas_corto += 1
-            corto_enviado.append(ticker)
-            estado["corto_enviado"] = corto_enviado
-            estado["mensajes_hoy"] = estado.get("mensajes_hoy", 0) + 1
-            guardar_estado(estado)
-            time.sleep(1)
-
-    print(f"[CORTO] {nuevas_corto} señal(es) corta(s) nueva(s) enviada(s)")
-    return nuevas_corto
-
 def check_earnings_proximos(ticker):
     try:
         cal=yf.Ticker(ticker).calendar
@@ -925,24 +768,6 @@ def check_tendencia_semanal(ticker):
     except:
         return True,"Error timeframe semanal (OK)"
 
-def check_tendencia_semanal_corto(ticker):
-    """NUEVO 11-ago-2026 — espejo bajista de check_tendencia_semanal()."""
-    try:
-        hist=yf.Ticker(ticker).history(period="1y",interval="1wk")
-        if hist.empty or len(hist)<20: return True,"Sin datos semanales (OK)"
-        c=hist["Close"]
-        sma8w=float(c.iloc[-8:].mean()); sma20w=float(c.iloc[-20:].mean()); precio=float(c.iloc[-1])
-        if precio<sma8w<sma20w:
-            return True,f"✅ Semanal bajista (P < SMA8w {sma8w:.1f} < SMA20w {sma20w:.1f})"
-        elif precio<sma20w:
-            return True,f"⚠️ Semanal neutral-bajista (bajo SMA20w {sma20w:.1f})"
-        elif precio<sma8w:
-            return True,f"🔄 Semanal debilitando (bajo SMA8w {sma8w:.1f})"
-        else:
-            return False,f"❌ Semanal alcista — sobre SMA8w {sma8w:.1f} y SMA20w {sma20w:.1f}"
-    except:
-        return True,"Error timeframe semanal (OK)"
-
 def obtener_datos(ticker):
     try:
         s=yf.Ticker(ticker)
@@ -972,19 +797,8 @@ def obtener_datos(ticker):
             ath_52w = ath_fi
         else:
             ath_52w = float(h.iloc[-252:].max()) if len(h)>=252 else float(h.max())
-        # NUEVO 11-ago-2026 — piso de 52 semanas, espejo del ATH, para el espacio
-        # del Sistema 6 Pasos CORTO (soporte hacia abajo en vez de techo arriba).
-        try:
-            piso_fi = float(getattr(fi, "fifty_two_week_low", None) or 0)
-        except:
-            piso_fi = 0
-        if piso_fi > 0:
-            piso_52w = piso_fi
-        else:
-            piso_52w = float(l.iloc[-252:].min()) if len(l)>=252 else float(l.min())
         mv,sv,hv_m,me=calc_macd(c); av,dip,dim,ae=calc_adx(h,l,c)
         atr_val=calc_atr(h,l,c); vela_patron,vela_fuerza=detectar_velas(hist)
-        vela_patron_corta,vela_fuerza_corta=detectar_velas_bajistas(hist)
         nombre=ticker; sector="N/A"; beta=None
         try:
             info=s.info
@@ -999,10 +813,8 @@ def obtener_datos(ticker):
                 "rsi":calc_rsi(c),"macd":mv,"macd_s":sv,"macd_h":hv_m,"macd_e":me,
                 "adx":av,"dip":dip,"dim":dim,"adx_e":ae,"atr":atr_val,
                 "beta":beta,
-                "vh":vh,"vh_proy":vh_proy,"vp":vp,"vol_r":vol_r,"ath_52w":ath_52w,"piso_52w":piso_52w,
-                "vela_patron":vela_patron,"vela_fuerza":vela_fuerza,
-                "vela_patron_corta":vela_patron_corta,"vela_fuerza_corta":vela_fuerza_corta,
-                "error":None}
+                "vh":vh,"vh_proy":vh_proy,"vp":vp,"vol_r":vol_r,"ath_52w":ath_52w,
+                "vela_patron":vela_patron,"vela_fuerza":vela_fuerza,"error":None}
     except Exception as ex:
         return {"ticker":ticker,"error":str(ex)}
 
@@ -1038,68 +850,6 @@ def analizar(d):
     return {"fan":fan,"c1":c1,"c2":c2,"c3":c3,"c4":c4,
             "en_rango":en_rango,"vol_r":vol_r,"vol_ok":vol_ok,"senal_tardia":tardia,
             "score":score,"score_det":f"Fan:{pts_fan}+RSI:{pts_rsi}+ADX:{pts_adx}+Vol:{pts_vol}+Vela:{pts_vela}"}
-
-def analizar_corto(d):
-    """NUEVO 11-ago-2026 — espejo bajista de analizar(). Mismos pesos de score,
-    condiciones invertidas (Paso 1: precio BAJO SMA200)."""
-    p=d["precio"]; s8,s20,s50,s200=d["sma8"],d["sma20"],d["sma50"],d["sma200"]
-    c1=bool(p<s200) if s200 else False        # Precio < SMA200 (PASO 1 CORTO — veto si falla)
-    c2=bool(s50<s200) if s50 and s200 else False  # SMA50 < SMA200 (tendencia estructural bajista)
-    c3=bool(s20<s50) if s20 and s50 else False    # SMA20 < SMA50  (impulso medio bajista)
-    c4=bool(p<s20) if s20 else False              # Precio < SMA20  (momentum inmediato bajista)
-    fan=sum([c1,c2,c3,c4]); en_rango=CONFIG["price_min"]<=p<=CONFIG["price_max"]
-    vol_r=d["vol_r"]; vol_ok=d["vh"]>=CONFIG["min_volume_abs"]
-    tardia=bool(s8 and p<s8*0.98)   # espejo: ya se alejo 2% BAJO SMA8, tarde para cortos
-    rsi_v=d["rsi"] if d["rsi"] else 0; adx_v=d["adx"] if d["adx"] else 0
-    pts_fan = fan*10
-    # Banda corto: RSI 42-60, centro simetrico ~51 (espejo de la banda larga 40-58)
-    if 47<=rsi_v<=55:      pts_rsi = 15
-    elif 42<=rsi_v<47 or 55<rsi_v<=60: pts_rsi = 10
-    elif 37<=rsi_v<42 or 60<rsi_v<=65: pts_rsi = 4
-    else:                  pts_rsi = 0
-    pts_adx=(15 if adx_v>=30 else 12 if adx_v>=25 else 8 if adx_v>=20 else 0)
-    if vol_r>=2.0:        pts_vol = 15
-    elif vol_r>=1.5:      pts_vol = 12
-    elif vol_r>=1.0:      pts_vol = 8
-    elif vol_r>=0.8:      pts_vol = 4
-    else:                 pts_vol = 0
-    pts_vela=int(d.get("vela_fuerza_corta",0)*0.15)
-    score=min(100,pts_fan+pts_rsi+pts_adx+pts_vol+pts_vela)
-    return {"fan":fan,"c1":c1,"c2":c2,"c3":c3,"c4":c4,
-            "en_rango":en_rango,"vol_r":vol_r,"vol_ok":vol_ok,"senal_tardia":tardia,
-            "score":score,"score_det":f"Fan:{pts_fan}+RSI:{pts_rsi}+ADX:{pts_adx}+Vol:{pts_vol}+Vela:{pts_vela}"}
-
-def posicion_corto(precio, piso_52w=None, atr=None, beta=None):
-    """
-    NUEVO 11-ago-2026 — espejo de posicion() para ventas en corto.
-    Stop ARRIBA del precio (cobertura si sube), targets ABAJO (ganancia si baja).
-    """
-    if atr and atr > 0 and precio > 0:
-        b = beta if beta and beta > 0 else 1.0
-        if b >= 1.5:    mult = 2.0
-        elif b >= 0.8:  mult = 1.5
-        else:           mult = 1.2
-        riesgo_atr = atr * mult
-        riesgo_atr = max(precio*0.03, min(precio*0.08, riesgo_atr))
-        stop = round(precio + riesgo_atr, 2)   # espejo: stop ARRIBA para corto
-    else:
-        stop = round(precio*(1+CONFIG["stop_loss_pct"]/100), 2)
-
-    rx  = stop - precio
-    acc = max(1, int(CONFIG["riesgo_fijo_usd"] / rx)) if rx > 0 else 0
-    tot = round(acc*precio, 2)
-    perd= round(acc*rx, 2)
-    t1  = round(precio - 1.5*rx, 2)   # targets ABAJO para corto
-    t2  = round(precio - 2.5*rx, 2)
-    t3  = round(precio - 4.0*rx, 2)
-    if piso_52w and piso_52w < precio:
-        piso_seguro = round(piso_52w*1.02, 2)   # espejo del 0.98 del techo largo
-        if piso_seguro < t1:
-            if t2 < piso_seguro: t2 = piso_seguro
-            if t3 < piso_seguro: t3 = piso_seguro
-    rr = round((precio-t2)/rx, 2) if rx > 0 else 0
-    return {"acc":acc,"tot":tot,"stop":stop,"perd":perd,
-            "t1":t1,"t2":t2,"t3":t3,"rx":rx,"rr":rr}
 
 def posicion(precio, ath_52w=None, atr=None, beta=None):
     """
@@ -1313,8 +1063,7 @@ def build_msg(d, a, pos, ia, sent_texto, tendencia_semanal, noticia_av=None, sec
     def esc(t): return (t or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
     tema_txt = f" · 🎯 {tema.upper()}" if tema else ""
     # ── BLOQUE 1 ──────────────────────────────────────────────
-    b1  = f"{prio_ico} <b>SIRIO v9 · {prio_txt}</b>\n"
-    b1 += f"🟢 <b>LARGO</b>\n"
+    b1  = f"{prio_ico} <b>SIRIO v8 · {prio_txt}</b>\n"
     b1 += f"🕐 {hora}{pm_tag}\n\n"
     b1 += f"<b>{d['ticker']}</b>  {d.get('nombre','')}\n"
     b1 += f"🏭 {d.get('sector','N/A')} · {etf_ref}{tema_txt}\n"
@@ -1408,7 +1157,7 @@ def build_msg_corto(d, a, pos, ia, tendencia_semanal, dist_s8=None):
     def esc(t): return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
     return (
-        f"🔄 <b>ACTUALIZACIÓN — {d['ticker']}</b>  {prio_ico} {prio_txt}  🟢 LARGO\n"
+        f"🔄 <b>ACTUALIZACIÓN — {d['ticker']}</b>  {prio_ico} {prio_txt}\n"
         f"🕐 {hora}\n\n"
 
         f"<b>¿Sigue válida la señal?</b>\n"
@@ -1655,23 +1404,12 @@ def main():
         fan_minimo_observar = CONFIG["min_fan_to_alert"]
         if a["fan"] < fan_minimo_observar or not a["en_rango"] or not a["vol_ok"]:
             razones["fan"] = razones.get("fan", 0) + 1; continue
-        # v10 (11-ago-2026): ELIMINADO el escalon fan->score. Lu decidio reemplazarlo
-        # por un chequeo de espacio real a la proxima resistencia (minimo 2:1). Score
-        # queda FIJO en 65 sin importar el fan (2, 3 o 4) — asi lo dice el canon.
-        score_minimo_efectivo = CONFIG["score_minimo"]  # siempre 65
+        # Compensacion por fan incompleto: a menor fan, mayor score exigido.
+        # v9: se agrega el escalon fan=2 (antes solo existia fan=3 con +5 de exigencia).
+        if a["fan"] == 2:      score_minimo_efectivo = 75
+        elif a["fan"] == 3:    score_minimo_efectivo = 70
+        else:                  score_minimo_efectivo = CONFIG["score_minimo"]  # fan=4, estandar 65
         es_fan3 = (a["fan"] == 3)  # se mantiene por compatibilidad con el resto del archivo
-
-        # NUEVO — chequeo de espacio 2:1: distancia libre hasta la proxima resistencia
-        # (el ATH 52s ya calculado en d["ath_52w"]) debe ser >= 2x la distancia de
-        # riesgo entrada-stop. Reutiliza posicion() (linea ~841) para el stop real,
-        # asi no se duplica la logica de ATR/Beta. Sin espacio, se descarta aunque
-        # el score sea alto.
-        pos_prelim = posicion(d["precio"], d.get("ath_52w"), d.get("atr"), d.get("beta"))
-        riesgo_prelim = pos_prelim["rx"]
-        espacio_disp = abs(d.get("ath_52w", 0) - d["precio"]) if d.get("ath_52w") else 0
-        if riesgo_prelim > 0 and (espacio_disp / riesgo_prelim) < CONFIG["espacio_min_rr"]:
-            print(f"    skip: espacio {espacio_disp/riesgo_prelim:.1f}:1 < {CONFIG['espacio_min_rr']}:1 minimo")
-            razones["espacio"] = razones.get("espacio", 0) + 1; continue
         # Volumen ratio mínimo 0.7x
         if a["vol_r"] < 0.7:
             print(f"    skip: vol_r {a['vol_r']:.1f}x < 0.7x mínimo")
@@ -1702,21 +1440,25 @@ def main():
             print(f"    skip: {tend_sem}")
             razones["semanal"] = razones.get("semanal", 0) + 1; continue
 
-        # ── FILTRO ATH 52s — 25% MÍNIMO ────────────────────
-        # Swing 5-10 días necesita ≥25% de espacio bajo el ATH 52s.
-        # Con menos margen el precio topa resistencia antes de completar el swing.
-        # Regla Lu: precio debe estar al menos 25% bajo el máximo histórico de 52s.
-        # FIX v7.1: eliminada la excepción de "ruptura" (dist_ath_pct < 0).
-        # Razón: yfinance.fast_info entrega el ATH con delay — un precio que supera
-        # levemente el ATH cacheado NO es una ruptura confirmada, es lag de datos.
-        # Resultado: acciones en/sobre ATH ahora quedan filtradas correctamente.
+        # ── FILTRO ATH 52s — CORREGIDO 04-sep-2026 ─────────────
+        # v10: la regla vieja pedia >=25% POR DEBAJO del maximo de 52 semanas.
+        # Eso esta invertido respecto a lo que documentan Minervini (Trend
+        # Template) y O'Neil (CANSLIM): los lideres de mercado cotizan CERCA
+        # de sus maximos, no lejos de ellos. Comprar 25%+ por debajo del ATH
+        # es comprar rezagados/turnarounds, lo opuesto a momentum/swing.
+        # Diagnostico real: 3 corridas de screener en vivo (31-ago al 1-sep)
+        # mostraron candidatos con RSI y SMA50 perfectos (FAF, HNGE, QRVO, GM,
+        # PCVX, FLR) descartados EXCLUSIVAMENTE por esta regla — el filtro
+        # llevaba meses sin encontrar nada por diseño, no por falta de setups.
+        # Regla nueva: precio debe estar DENTRO del 15% del maximo de 52s
+        # (cerca de maximos = liderazgo confirmado), no mas del 15% debajo.
         ath_v = d.get("ath_52w", 0)
         if ath_v and ath_v > 0 and d["precio"] > 0:
             dist_ath_pct = (ath_v - d["precio"]) / ath_v * 100
-            if dist_ath_pct < 25.0:   # FIX 04-ago-2026: estaba en 10.0, regla real es 25% mínimo
+            if dist_ath_pct > 15.0:   # v10: invertido — antes exigia minimo, ahora exige maximo
                 print(f"    skip: ATH 52s — {dist_ath_pct:.1f}% del maximo 52s "
-                      f"({ath_v:.2f}) — necesita >=25% de espacio")
-                razones["cerca_ath"] = razones.get("cerca_ath", 0) + 1
+                      f"({ath_v:.2f}) — necesita <=15% de distancia (cerca de maximos)")
+                razones["lejos_ath"] = razones.get("lejos_ath", 0) + 1
                 continue
 
         # ── Verificar zona de entrada ─────────────────────────
@@ -1889,7 +1631,7 @@ def main():
             f"{label_m} <b>SISTEMA SIRIO — Solares</b>\n"
             f"🕐 {hora_et()} · {zona_txt}\n\n"
             f"✅ Sirio activo · primer escaneo del día\n"
-            f"⚙️ ~900 tickers · score ≥65 · ATH ≥25% · precio>SMA200 · fan 2/3+\n"
+            f"⚙️ ~900 tickers · score ≥65 · ATH ≤15% (cerca max) · precio>SMA200 · fan 2/3+\n"
             f"📊 VIX: <b>{vix_str_hb}</b>\n\n"
             f"{ciclo_txt_hb}{astro_txt_hb}\n"
             f"<i>Señal nueva → aviso inmediato.</i>\n"
@@ -1904,12 +1646,6 @@ def main():
             print("  [HB] Heartbeat enviado OK ✅")
         else:
             print("⚠️⚠️⚠️  TELEGRAM NO RESPONDE — verificar TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en Secrets  ⚠️⚠️⚠️")
-
-    # ── SISTEMA 6 PASOS CORTO — NUEVO 11-ago-2026 ───────────────────────────
-    # Pasada independiente, mismo universo. Ver escanear_cortos() para el detalle.
-    nuevas_corto = escanear_cortos(pendientes, estado, razones)
-    nuevas += nuevas_corto   # cuenta para la logica de status de abajo — un dia
-                              # con solo señales cortas tampoco debe decir "Sin resultados"
 
     # ── STATUS PERIÓDICO — lógica de notificación ───────────────────────────
     # Reglas:
@@ -1927,7 +1663,7 @@ def main():
     if debe_status:
         mapa = {"fan":"Fan 4/4","sma200":"Precio<SMA200","score":"Score<65","earnings":"Earnings",
                 "semanal":"Semanal baj.","tardia":"Tardía","error":"Error datos",
-                "cerca_ath":"ATH<25%","extendida":">2%SMA8","espacio":"Espacio<2:1",
+                "lejos_ath":"ATH>15% lejos","extendida":">2%SMA8",
                 "cooldown":"Cooling","vol_bajo":"Vol bajo","rsi_extremo":"RSI>80"}
         top5 = sorted(razones.items(), key=lambda x:x[1], reverse=True)[:5]
         skips_txt = " · ".join(f"{mapa.get(k,k)}:{v}" for k,v in top5) if top5 else "sin datos"
@@ -1941,13 +1677,9 @@ def main():
         else:
             msg_status = "⚪ Sin resultados."
 
-        # v10 (11-ago-2026): skips_txt se calculaba pero nunca se mandaba — Lu
-        # tenia que ir a los logs de GitHub para saber por que no llegaban señales.
-        # Ahora va en el mensaje cuando hay 0 señales, para diagnostico rapido.
-        detalle_txt = f"\n<i>{skips_txt}</i>" if (señales_hoy == 0 and skips_txt != "sin datos") else ""
         ok_sc = send_telegram(
-            f"<b>Sirio v9</b> · {hora_et()}\n"
-            f"{msg_status}{detalle_txt}"
+            f"<b>Sirio v7</b> · {hora_et()}\n"
+            f"{msg_status}"
         )
         if ok_sc:
             estado["ts_ultimo_mensaje"]         = time.time()
@@ -2117,39 +1849,45 @@ TICKERS_NUEVOS_V8 = [
 ]
 
 
-# ── FONDITO MONITOR ──────────────────────────────────────────
-# v9: corregido — tenia solo cantidades de T1 (04-may). Ahora incluye T2 (07-jul)
-# con costo promedio ponderado real. Verificar contra el estado de cuenta IBKR
-# si se ejecuta una T3 antes de que esto se vuelva a actualizar.
+# ── FONDITO MONITOR — v3.0 "Core Productivo + Asimetría Controlada" ──
+# v10 (04-sep-2026): reestructuracion completa. Se abandonan las 12 capas
+# tematicas con gates de precio (SMR, URA, ASTS, UCTT, CAVA, CELH, REMX,
+# AYA, BE, SPCX) porque los gates rompian la logica del DCA — el capital
+# quedaba parado esperando un precio que a veces nunca volvia (UCTT paso
+# de gate $65 a cotizar $90-100+, ASTS paso de gate $55 a $70, SMR/URA
+# nunca confirmaron reversion tecnica en 4 meses). Estructura nueva: 9
+# posiciones fijas, SIN gates de precio, DCA por calendario para todas.
+# AMKR: cumplia su gate ($63) desde el principio pero no se ejecuto por
+# falta de decision de tamaño — queda fuera de la nueva estructura, no
+# porque la tesis fallara sino por la reestructuracion misma.
+#
+# Costos promedio reconstruidos de la conversacion con Lu (tranches T1-T4
+# + la tranche de arranque del 04-sep). VERIFICAR contra el estado de
+# cuenta IBKR real — estas cifras son best-effort, no un pull directo del
+# broker. Actualizar cada vez que se ejecute un tranche nuevo.
 FONDITO_ACTIVAS = {
-    "IAU":  {"entrada": 81.765,  "shares": 4,      "tipo": "oro"},      # T1 2@85.03 + T2 2@78.50
-    "SLV":  {"entrada": 60.7875, "shares": 4,      "tipo": "plata"},    # T1 2@65.935 + T2 2@55.64
-    "XLE":  {"entrada": 57.133,  "shares": 5,      "tipo": "energia"},  # T1 3@59.235 + T2 2@53.98
-    "SGOV": {"entrada": 100.4325,"shares": 1.9958, "tipo": "cash"},     # T1 0.9958@100.417 + T2 1@100.45
+    "IAU":  {"entrada": 80.54,  "shares": 8,  "tipo": "oro",        "peso_obj": 12},
+    "SLV":  {"entrada": 57.99,  "shares": 9,  "tipo": "plata",      "peso_obj": 8},
+    "XLE":  {"entrada": 58.41,  "shares": 8,  "tipo": "energia",    "peso_obj": 7},   # verificar vs IBKR, screenshot mostro 9
+    "SGOV": {"entrada": 100.43, "shares": 4,  "tipo": "cash",       "peso_obj": 10},
+    "HODL": {"entrada": 19.73,  "shares": 18, "tipo": "bitcoin",    "peso_obj": 15},
+    "ONEQ": {"entrada": 102.12, "shares": 6,  "tipo": "tech_broad", "peso_obj": 22},
+    "MP":   {"entrada": 54.12,  "shares": 2,  "tipo": "tierras_raras","peso_obj": 8},
+    "KTOS": {"entrada": 50.14,  "shares": 3,  "tipo": "defensa",    "peso_obj": 8},
+    "SOXQ": {"entrada": 91.78,  "shares": 2,  "tipo": "semis",      "peso_obj": 10},
 }
 
-FONDITO_PENDIENTES = {
-    # v10 (11-ago-2026): HODL T1 ya ejecutado, T2 va en septiembre por calendario
-    # normal — se saca de aqui (no hay condicion de entrada especial, y la nota de
-    # "Clarity Act aprobado" era falsa, el acto sigue sin pasar el Senado).
-    # AYA: eliminada del plan (jul-2026). CELH y MP: sacadas del plan (11-ago-2026,
-    # decision de Lu — CELH crashed -18% post-earnings, MP en revision).
-    "URA":  {"cond": "reversion_tecnica", "presupuesto": 750,  "nota": "Nuclear ancla v8 — esperar reversion tecnica confirmada"},
-    "SMR":  {"cond": "reversion_tecnica", "presupuesto": 290,  "nota": "Especulativo pequeño — esperar reversion tecnica confirmada"},
-    "ASTS": {"cond": "precio_max",  "precio_max": 55,    "presupuesto": 520,  "nota": "SpaceX proxy"},
-    "UCTT": {"cond": "precio_max",  "precio_max": 65,    "presupuesto": 520,  "nota": "Semis backend"},
-    "AMKR": {"cond": "precio_max",  "precio_max": 63,    "presupuesto": 520,  "nota": "Semis backend — condicion alcanzada 11-ago, sizing pendiente de Lu"},
-    "REMX": {"cond": "precio_rsi",  "precio_max": 95, "rsi_max": 65, "presupuesto": 0, "nota": "Watchlist tierras raras"},
-    "CAVA": {"cond": "sobre_sma50", "presupuesto": 390,  "nota": "GLP-1 estilo vida"},
-    "KTOS": {"cond": "sobre_sma50", "presupuesto": 1170, "nota": "Defensa geopolitica"},
-    "ONEQ": {"cond": "sobre_sma50", "presupuesto": 1300, "nota": "Tech broad — T1 ejecutado, proximo tranche por calendario"},
-}
+# v10: ya no hay FONDITO_PENDIENTES — la nueva filosofia es DCA por tiempo
+# para las 9 posiciones, sin condicion de precio. Aportes mensuales
+# moderados ($700-1200) repartidos por prioridad (ONEQ, IAU, HODL, SGOV,
+# MP primero) hasta acercarse a los pesos objetivo de cada capa.
 
 def fondito_monitor():
     """
-    Monitoreo del portafolio pasivo Fondito.
+    Monitoreo del portafolio pasivo Fondito v3.0 (9 posiciones, sin gates).
     1. Posiciones ACTIVAS: alerta si RSI semanal > 75 (toma parcial 25%)
-    2. Pendientes PRECIO: alerta si alcanzaron condición de entrada
+    2. Sin capas pendientes — todo el capital tematico ya esta desplegado,
+       las 9 posiciones se alimentan por calendario, no por condicion.
     3. Retorna mensaje Telegram o None si no hay nada urgente.
     """
     alertas = []
@@ -2166,7 +1904,8 @@ def fondito_monitor():
             rsi_w = calc_rsi(c, 14)
             entrada = info["entrada"]
             pct_desde = round((precio - entrada) / entrada * 100, 1)
-            print(f"    {ticker}: ${precio:.2f} | RSI_w={rsi_w:.0f if rsi_w else 'N/A'} | {pct_desde:+.1f}% desde entrada")
+            rsi_txt = f"{rsi_w:.0f}" if rsi_w else "N/A"
+            print(f"    {ticker}: ${precio:.2f} | RSI_w={rsi_txt} | {pct_desde:+.1f}% desde entrada")
             if rsi_w and rsi_w > 75:
                 alertas.append(
                     f"⚠️ <b>{ticker}</b> — RSI semanal {rsi_w:.0f} &gt; 75\n"
@@ -2176,66 +1915,6 @@ def fondito_monitor():
                 )
         except Exception as ex:
             print(f"    {ticker} error: {ex}")
-
-    # ── Pendientes — condición de precio ─────────────────────
-    for ticker, info in FONDITO_PENDIENTES.items():
-        cond = info.get("cond","")
-        if cond not in ("precio_max","precio_rsi","sobre_sma50","reversion_tecnica"):
-            continue
-        try:
-            fi = yf.Ticker(ticker).fast_info
-            precio = float(getattr(fi, "last_price", None) or 0)
-            if precio <= 0: continue
-            nota = info.get("nota","")
-            presup = info.get("presupuesto", 0)
-            shares_aprox = int(presup / precio) if precio > 0 else 0
-
-            if cond == "reversion_tecnica":
-                # v10 (11-ago-2026): antes esto era "entrar_ya" (siempre verdadero,
-                # ese era el bug). Ahora exige recuperacion real: precio sobre
-                # SMA20 Y RSI saliendo de zona debil (>40) — reversion confirmada,
-                # no una condicion muerta que siempre dispara.
-                hist_r = yf.Ticker(ticker).history(period="60d")
-                if hist_r.empty: continue
-                sma20_v = float(hist_r["Close"].iloc[-20:].mean())
-                rsi_v = calc_rsi(hist_r["Close"])
-                if precio >= sma20_v and rsi_v and rsi_v > 40:
-                    alertas.append(
-                        f"✅ <b>{ticker}</b> — REVERSIÓN TÉCNICA CONFIRMADA\n"
-                        f"   💲 ${precio:.2f} ≥ SMA20 ${sma20_v:.2f} ✅ | RSI {rsi_v:.0f} &gt; 40 ✅ | {nota}\n"
-                        f"   → ~{shares_aprox} acciones | ${presup} presupuesto"
-                    )
-            elif cond == "precio_max":
-                precio_max = info.get("precio_max", 9999)
-                if precio <= precio_max:
-                    alertas.append(
-                        f"✅ <b>{ticker}</b> — CONDICIÓN ALCANZADA\n"
-                        f"   💲 ${precio:.2f} ≤ ${precio_max} ✅ | {nota}\n"
-                        f"   → ~{shares_aprox} acciones | ${presup} presupuesto"
-                    )
-            elif cond == "precio_rsi":
-                precio_max = info.get("precio_max", 9999)
-                rsi_max_f = info.get("rsi_max", 65)
-                hist_r = yf.Ticker(ticker).history(period="60d")
-                rsi_v = calc_rsi(hist_r["Close"]) if not hist_r.empty else None
-                if precio <= precio_max and rsi_v and rsi_v <= rsi_max_f:
-                    alertas.append(
-                        f"✅ <b>{ticker}</b> — WATCHLIST ACTIVADA\n"
-                        f"   💲 ${precio:.2f} ≤ ${precio_max} ✅ | RSI {rsi_v:.0f} ≤ {rsi_max_f} ✅\n"
-                        f"   → {nota}"
-                    )
-            elif cond == "sobre_sma50":
-                hist_r = yf.Ticker(ticker).history(period="60d")
-                if not hist_r.empty:
-                    sma50_v = float(hist_r["Close"].iloc[-50:].mean())
-                    if precio >= sma50_v:
-                        alertas.append(
-                            f"✅ <b>{ticker}</b> — SOBRE SMA50\n"
-                            f"   💲 ${precio:.2f} ≥ SMA50 ${sma50_v:.2f} ✅ | {nota}\n"
-                            f"   → ~{shares_aprox} acciones | ${presup} presupuesto"
-                        )
-        except Exception as ex:
-            print(f"    {ticker} fondito error: {ex}")
 
     ciclo_txt = ""
     if CICLO_MOSTRAR_EN_BOT:
@@ -2281,4 +1960,3 @@ if __name__ == "__main__":
         # por eso GitHub Actions marcaba el run en VERDE aunque el bot se
         # hubiera caído. Ahora sale con código de error real.
         sys.exit(1)
-
